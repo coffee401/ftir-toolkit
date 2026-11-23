@@ -1,5 +1,7 @@
 # ftir-toolkit
 
+[**English**](README.en.md) | 中文
+
 给**不需要红外专业知识、只想要结论**的人用的 FT-IR 工具包。
 
 一张谱进去，三个问题出来：
@@ -13,7 +15,7 @@
 | 目录 | 是什么 | 怎么用 |
 |---|---|---|
 | [`ftir-tool/`](ftir-tool/README.md) | 独立的命令行工具（Python） | 本地跑，出报告和图 |
-| [`ftir-dsh-plugin/`](ftir-dsh-plugin/README.md) | DeepSeek Harness 插件（TypeScript） | 装进 DSH，让 Agent 自己调 |
+| [`dsh-ftir-plugin/`](dsh-ftir-plugin/README.md) | DeepSeek Harness 插件（TypeScript） | 装进 DSH，让 Agent 自己调 |
 
 插件内置的就是 `ftir-tool` 的引擎（`assets/ftir.py` 是单一副本），两者行为一致。
 
@@ -34,7 +36,7 @@ python -m venv .venv
 ### DSH 插件
 
 ```
-cd ftir-dsh-plugin
+cd dsh-ftir-plugin
 npm install --legacy-peer-deps
 npm run build
 # 改 local.cordis.yml 里的绝对路径，然后
@@ -66,6 +68,14 @@ pnpm dsh web --patch ./local.cordis.yml
 
 - 中国药典 2025 年版四部 通则 0402（红外光谱法）：峰位偏差 ±5 cm⁻¹、ATR 与透射不可直接比对、相似度阈值需预设并验证
 - GB/T 6040-2019《红外光谱分析方法通则》：信噪比 < 3 的峰不可作为定性依据
+
+## 版本与升级
+
+- 版本号遵循语义化版本：修 bug → patch，新增工具 → minor，改动接口 → major
+- 每次发布打 tag 并写 `CHANGELOG.md`；GitHub Releases 里可以下载任意旧版
+- 用补丁方式本地加载的：`git pull && npm run build`，重启 DSH 生效
+- 用 npm 安装的：旧版不会被自动替换，需要重新指定版本安装后重启 profile
+- ⚠️ `dsh-ftir-plugin/assets/ftir.py` 是引擎副本，改了 `ftir-tool/ftir.py` 必须同步，否则插件仍在跑旧逻辑
 
 ## License
 

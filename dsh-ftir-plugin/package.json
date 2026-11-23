@@ -21,7 +21,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/coffee401/ftir-toolkit.git",
-    "directory": "ftir-dsh-plugin"
+    "directory": "dsh-ftir-plugin"
   },
   "bugs": {
     "url": "https://github.com/coffee401/ftir-toolkit/issues"

@@ -3,4 +3,4 @@
 # 把下面的占位路径替换成你本机的实际路径（Windows 用正斜杠）
 - insert:
     - id: ftir
-      name: '/absolute/path/to/ftir-dsh-plugin/lib/index.js'
+      name: '/absolute/path/to/dsh-ftir-plugin/lib/index.js'

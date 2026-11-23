@@ -1,5 +1,7 @@
 # dsh-ftir
 
+[**English**](README.en.md) | 中文
+
 DeepSeek Harness 的红外光谱插件。给**不懂红外、只想要结论**的人用：一张谱进去，"能不能用 / 有什么 / 和对照一不一样"三个答案出来。
 
 数值计算由内置的 Python 引擎（`assets/ftir.py`）完成，插件本身只做参数传递与结果格式化。
@@ -41,7 +43,7 @@ npm install --legacy-peer-deps
 npm run build
 
 # 2. 把 local.cordis.yml 里的路径改成你本机的 lib/index.js 绝对路径
-#    Windows 注意用正斜杠，例如 D:/tools/ftir-dsh-plugin/lib/index.js
+#    Windows 注意用正斜杠，例如 D:/tools/dsh-ftir-plugin/lib/index.js
 
 # 3. 启动时挂载
 pnpm dsh web --patch ./local.cordis.yml
@@ -81,7 +83,7 @@ dsh plugin --profile web add ./dsh-ftir-0.1.0.tgz
 ## 目录结构
 
 ```
-ftir-dsh-plugin/
+dsh-ftir-plugin/
 ├── src/
 │   ├── index.ts        # 插件入口，注册 4 个工具
 │   └── runner.ts       # 调用 Python 引擎、解析 JSON
