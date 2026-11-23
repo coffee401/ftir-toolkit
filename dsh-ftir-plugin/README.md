@@ -11,11 +11,18 @@ DeepSeek Harness 宿主插件，将 `ftir-toolkit` 的能力注册为四个 Agen
 | 工具 | 入参 | 返回 |
 |---|---|---|
 | `ftir_check` | `file` | `verdict`（合格 / 需注意 / 不可用）、`metrics`（信噪比、饱和、水峰、CO₂、基线）、`problems`、`notes`、报告与图路径 |
-| `ftir_read` | `file`、`peaks`（可选） | `peaks[]`（含 `confidence`、`alternatives`）、`conclusion`、`supported`、`caveats`、`orthogonal`、`databases`、`reading`、`literature`、`risk`、报告与图路径 |
-| `ftir_match` | `sample`、`reference`、`threshold`（可选） | `verdict`、`metrics`（全谱/指纹区相关系数、最大峰位偏差、匹配与未匹配峰数）、`differences[]`、报告与图路径 |
+| `ftir_read` | `file`、`peaks`（可选）、`lookup`（可选） | `peaks[]`（含 `pos`、`subpixel`、`asymmetry`、`shoulder`、`confidence`、`alternatives`）、`conclusion`、`supported`、`caveats`、`orthogonal`、`databases`、`reading`、`literature`、`risk`、报告与图路径 |
+| `ftir_match` | `sample`、`reference`、`threshold`、`deriv_threshold`（均可选） | `verdict`、`metrics`（原始/一阶导/二阶导/指纹区相关系数、最大峰位偏差、匹配与未匹配峰数）、`criteria`（`base_pass`、`deriv_pass`）、`diagnosis[]`、`differences[]`、报告与图路径 |
 | `ftir_doctor` | — | Python 版本、解释器路径、`numpy` / `scipy` / `matplotlib` 版本 |
 
 每个工具都在输出目录写入 Markdown 报告与 PNG 图，路径随返回值给出，Agent 可直接读取或展示。
+
+**判定字段说明**（供 Agent 组织回答时使用）
+
+- `criteria.base_pass`：原始谱相关、峰位偏差、差异带三项是否全部通过
+- `criteria.deriv_pass`：一阶导相关是否达到阈值；与 `base_pass` 不一致时，`diagnosis` 会说明是「系统性峰位偏移」还是「基线/膜厚差异」
+- `peaks[].shoulder`：`true` 表示该峰较宽一侧确有未分辨组分（不对称比 ≥ 1.30 且二阶导有极大）
+- `peaks[].asymmetry`：`null` 表示该峰过窄或过宽，比值不可靠，不应引用
 
 ## 运行要求
 

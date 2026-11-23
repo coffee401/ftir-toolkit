@@ -25,6 +25,7 @@
 | **S17** | SDBS, AIST（日本产业技术综合研究所） | 有机物谱库（IR / Raman / NMR / MS），免费 | [sdbs.db.aist.go.jp](https://sdbs.db.aist.go.jp/) | 2026-11-24 |
 | **S18** | Coblentz Society Spectral Database | 专业红外谱库（订阅），谱图经评审 | [coblentz.org](https://www.coblentz.org/) | 2026-11-24 |
 | **S19** | *Indonesian J. Sci. Technol.* **2022**, "Interpretation of FTIR Spectra: A Practical Approach in the Polymer/Plastic Thermal Decomposition" | 面向实操的判读流程示例（先官能团区、后指纹区） | [DOI](https://doi.org/10.17509/ijost.v8i1.53297) | 2026-11-24 |
+| **S20** | ASTM E2310-04(2014), *Standard Guide for Use of Spectral Searching by Curve Matching Algorithms with Data with Mid-infrared Spectroscopy* | 中红外谱库检索的唯一权威指南：明确 HQI 无统一定义、由各软件自行规定；列出欧氏距离、相关系数、一阶导数欧氏距离等算法；指出强带主导归一化会使弱指纹带失效，并强调数据点须先对齐 | [astm.org](https://www.astm.org/e2310-04r14.html) | 2026-11-24 |
 
 ## 这些文献如何影响工具设计
 
@@ -40,10 +41,13 @@
 | 分峰拟合结果标注"非唯一"，不用作绝对百分比 | S10、S11 |
 | 拒绝在饱和或信噪比 < 3 时给归属结论 | S5 |
 | 相似度判定阈值需预设并可调，报告注明来源 | S4 |
-
 | 报告固定附「方法学参考」清单（S1/S3/S13/S14/S19） | S13、S14 |
 | 报告固定附「交叉验证建议」，按识别到的基团给出正交手段 | S4、S14、S15 |
 | 文献线索只作关键词线索，明确标注"不是同一化合物" | S13、S16-S18 |
+| 比对加入一阶导相关，并在两条相关判据矛盾时降级为「需复核」 | S20 |
+| 峰位由三点抛物线插值定位（不满足条件时退回栅格值） | S4（±5 cm⁻¹ 判据需要更细的位置分辨） |
+| 肩峰需「不对称 + 二阶导极大」双条件，不用单一 FWHM 阈值 | S1、S3 |
+| 不实现名为 HQI 的单一得分：ASTM 明确 HQI 无统一定义 | S20 |
 
 ## 关于「从论文里找相同谱图」
 

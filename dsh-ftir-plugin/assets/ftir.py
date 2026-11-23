@@ -176,9 +176,105 @@ def second_derivative(spec, grid=GRID):
     return -savgol_filter(spec, 15, 3, deriv=2, delta=float(grid[1] - grid[0]))
 
 
+def subpixel_pos(grid, spec, i, max_shift=0.5):
+    """Apex position by three-point parabolic interpolation.
+
+    The grid spacing is the hard resolution limit: on a 2 cm-1 grid every peak
+    position carries about +-1 cm-1 of quantisation, which is a fifth of the
+    +-5 cm-1 acceptance limit used for identification. Fitting the apex through
+    its two neighbours recovers roughly 0.1 cm-1.
+
+    Returns (position, reliable). Falls back to the grid point when the apex is
+    flat, noisy, or outside the bracket.
+    """
+    if i <= 0 or i >= len(spec) - 1:
+        return float(grid[i]), False
+    y0, y1, y2 = float(spec[i - 1]), float(spec[i]), float(spec[i + 1])
+    denom = y0 - 2.0 * y1 + y2
+    if denom >= -1e-12:              # not concave: flat top or noise
+        return float(grid[i]), False
+    delta = 0.5 * (y0 - y2) / denom
+    if abs(delta) > max_shift:       # apex outside the bracket: unreliable
+        return float(grid[i]), False
+    return float(grid[i] + delta * (grid[1] - grid[0])), True
+
+
+def peak_asymmetry(grid, spec, i):
+    """Left and right half-width at half maximum.
+
+    A symmetric band gives a ratio near 1.0. When one side is markedly wider,
+    the band is either composite or carries an unresolved shoulder on that
+    side; a single FWHM value cannot express this.
+    """
+    try:
+        _, _, lip, rip = peak_widths(spec, [i], rel_height=0.5)
+    except Exception:
+        return None
+    dx = abs(float(grid[1] - grid[0]))
+    left = (i - float(lip[0])) * dx       # high-wavenumber side
+    right = (float(rip[0]) - i) * dx      # low-wavenumber side
+    if left <= 0 or right <= 0:
+        return None
+    ratio = max(left, right) / min(left, right)
+    return {"left": left, "right": right, "ratio": ratio,
+            "side": "高波数侧" if left > right else "低波数侧"}
+
+
+def shoulder_on_side(spec, grid, i, asym, d2=None, search_cm=45, min_frac=0.04,
+                      min_ratio=1.30):
+    """Look for a second-derivative maximum on the wider side of a band.
+
+    An unresolved shoulder shows up as a separate maximum in the second
+    derivative. Two conditions must both hold — the band is genuinely
+    asymmetric (ratio >= min_ratio) and a derivative feature exists on that
+    side — otherwise the flag would fire on nearly every band.
+    """
+    if asym is None or asym["ratio"] < min_ratio:
+        return False
+    if d2 is None:
+        d2 = second_derivative(spec, grid)
+    dx = abs(float(grid[1] - grid[0]))
+    k = max(int(search_cm / dx), 3)
+    if asym["side"] == "高波数侧":        # indices before i (grid is descending)
+        lo, hi = max(0, i - k), i - 1
+    else:
+        lo, hi = i + 1, min(len(spec) - 1, i + k)
+    if hi - lo < 2:
+        return False
+    seg = d2[lo:hi + 1]
+    if seg.size == 0 or float(seg.max()) <= 0:
+        return False
+    pk, _ = find_peaks(seg, prominence=max(float(seg.max()) * min_frac, 1e-9))
+    return bool(len(pk))
+
+
+def deriv_correlation(s, r, order=1, window=15):
+    """Correlation of nth-order derivative spectra.
+
+    The first derivative removes a constant offset, the second removes offset
+    and slope. Library-search software calls this derivative correlation: it
+    compares band positions and shapes instead of the physical baseline, which
+    is what separates "genuinely different" from "same bands, different
+    baseline or film thickness".
+    """
+    if len(s) < window + 2:
+        return float("nan")
+    ds = savgol_filter(s, window, 3, deriv=order, delta=1.0)
+    dr = savgol_filter(r, window, 3, deriv=order, delta=1.0)
+    if float(np.std(ds)) < 1e-12 or float(np.std(dr)) < 1e-12:
+        return float("nan")
+    return float(np.corrcoef(ds, dr)[0, 1])
+
+
 def detect_maxima(spec, grid=GRID, prominence=0.015):
     idx, _ = find_peaks(spec, prominence=prominence, distance=3)
     return grid[idx], spec[idx]
+
+
+def maxima_subpixel(spec, grid=GRID, prominence=0.015):
+    """Peak positions with parabolic apex interpolation (about 0.1 cm-1)."""
+    idx, _ = find_peaks(spec, prominence=prominence, distance=3)
+    return np.array([subpixel_pos(grid, spec, int(i))[0] for i in idx], dtype=float)
 
 
 def nearest_max(spec, center, tol, grid=GRID, maxima=None):
@@ -976,7 +1072,7 @@ def cmd_deconv(args):
     print(f"\nsaved: {csv_path}\nsaved: {png_path}")
 
 
-def _confidence(pos, rel, fwhm, d, q):
+def _confidence(pos, rel, fwhm, d, q, asym=None, shoulder=False):
     """Grade a single assignment. Returns (level, reasons)."""
     if d is None:
         return "低", ["峰位不在已知基团区间内"]
@@ -990,9 +1086,13 @@ def _confidence(pos, rel, fwhm, d, q):
     elif rel < 0.2:
         score -= 1
         why.append(f"弱峰（相对强度 {rel * 100:.0f}%）")
-    if fwhm >= 80:
+    if shoulder:
         score -= 1
-        why.append(f"峰宽 {fwhm:.0f} cm⁻¹，可能为多峰叠加")
+        why.append(f"峰不对称（左右半宽比 {asym['ratio']:.2f}），"
+                   f"{asym['side']}二阶导存在肩峰，可能为多峰叠加")
+    elif fwhm >= 80:
+        score -= 1
+        why.append(f"峰宽 {fwhm:.0f} cm⁻¹，可能为多峰叠加（未见明确肩峰）")
     if q and q.get("water") and (3200 <= pos <= 3600 or 1600 <= pos <= 1670):
         score -= 1
         why.append("与吸潮水峰区间重叠")
@@ -1013,16 +1113,32 @@ def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02, q=None):
     order = np.argsort(props["prominences"])[::-1][:max_n]
     idx = np.sort(idx[order])
     top = float(np.max(spec)) or 1.0
+    d2 = second_derivative(spec, grid)
     rows = []
     for i in idx:
-        pos = float(grid[i])
+        pos, precise = subpixel_pos(grid, spec, i)
         h = float(spec[i])
         w = float(peak_widths(spec, [i], rel_height=0.5)[0][0] * (grid[1] - grid[0]))
         d = assign_detail(pos)
         rel = h / top
-        conf, why = _confidence(pos, rel, w, d, q)
+        asym = peak_asymmetry(grid, spec, i)
+        # A half-width spanning fewer than ~6 sample points cannot give a
+        # trustworthy left/right ratio (12 cm-1 at a 2 cm-1 grid). Conversely,
+        # beyond ~100 cm-1 the envelope is a composite of several bands, so a
+        # single half-width carries no interpretable meaning and is suppressed.
+        if asym is None or w < 12 or w >= 100:
+            asym = {"left": float("nan"), "right": float("nan"),
+                    "ratio": float("nan"), "side": "—", "valid": False}
+        else:
+            asym["valid"] = True
+        shoulder = shoulder_on_side(spec, grid, i, asym if asym["valid"] else None, d2=d2)
+        conf, why = _confidence(pos, rel, w, d, q, asym=asym, shoulder=shoulder)
         rows.append({
-            "pos": pos, "abs": h, "rel": rel, "fwhm": w,
+            "pos": pos, "grid_pos": float(grid[i]), "precise": precise,
+            "abs": h, "rel": rel, "fwhm": w,
+            "asym": asym,
+            "asym_text": f"{asym['ratio']:.2f}" if asym["valid"] else "—",
+            "shoulder": shoulder,
             "strength": strength_cn(rel), "shape": shape_cn(w),
             "band": d["name"] if d else "未归类",
             "note": d["note"] if d else "",
@@ -1381,11 +1497,14 @@ def cmd_read(args):
     review = [r for r in rows if r["conf"] != "高"]
 
     print(f"=== 谱图解析：{path.name} ===")
-    print(f"{'峰位':>6} {'强度':>4} {'峰形':>4} {'FWHM':>6} {'可信度':>5}  参考归属")
-    print("-" * 66)
+    print(f"{'峰位':>7} {'强度':>4} {'峰形':>4} {'FWHM':>6} {'不对称':>7} {'可信度':>5}  参考归属")
+    print("-" * 74)
     for r in rows:
-        print(f"{r['pos']:>6.0f} {r['strength']:>4} {r['shape']:>4} "
-              f"{r['fwhm']:>6.0f} {r['conf']:>5}  {r['band']}")
+        flag = "*" if r["shoulder"] else " "
+        print(f"{r['pos']:>7.1f} {r['strength']:>4} {r['shape']:>4} "
+              f"{r['fwhm']:>6.0f} {r['asym_text'] + flag:>7} {r['conf']:>5}  {r['band']}")
+    print("  峰位由抛物线插值给出（约 0.1 cm⁻¹）；不对称 = 左右半宽比，"
+          "* 表示较宽一侧二阶导存在肩峰")
     print("\n【结论】")
     print(summary)
     print(verdict)
@@ -1460,10 +1579,14 @@ def cmd_read(args):
         f"# 谱图解析：{path.name}", "",
         "> 本报告为**归属假设**，不是结构确证。判读前请阅读文末「可信度声明」。", "",
         "## 峰表", "",
-        "| 峰位 (cm⁻¹) | 强度 | 峰形 | FWHM | 可信度 | 参考归属 |",
-        "|---|---|---|---|---|---|",
-        *[f"| {r['pos']:.0f} | {r['strength']} | {r['shape']} | {r['fwhm']:.0f} "
+        "| 峰位 (cm⁻¹) | 强度 | 峰形 | FWHM | 不对称 | 肩峰 | 可信度 | 参考归属 |",
+        "|---|---|---|---|---|---|---|---|",
+        *[f"| {r['pos']:.1f} | {r['strength']} | {r['shape']} | {r['fwhm']:.0f} "
+          f"| {r['asym_text']} | {'有' if r['shoulder'] else '—'} "
           f"| {r['conf']} | {r['band']} |" for r in rows],
+        "",
+        "> 峰位由三点抛物线插值给出（精度约 0.1 cm⁻¹，栅格为 2 cm⁻¹）；"
+        "不对称 = 左右半高宽之比，1.00 为完全对称；肩峰由「不对称 + 该侧二阶导极大」双重判定。",
         "", "## 结论", "",
         summary, "", verdict, "",
         *([f"> 注意：{c}" for c in caveat] + [""] if caveat else []),
@@ -1494,8 +1617,14 @@ def cmd_read(args):
     if getattr(args, "json", False):
         print(json.dumps({
             "ok": True, "file": str(path),
-            "peaks": [{"pos": round(r["pos"], 1), "strength": r["strength"],
+            "peaks": [{"pos": round(r["pos"], 1), "grid_pos": round(r["grid_pos"], 1),
+                       "subpixel": bool(r["precise"]),
+                       "strength": r["strength"],
                        "shape": r["shape"], "fwhm": round(r["fwhm"], 1),
+                       "asymmetry": (round(r["asym"]["ratio"], 2)
+                                     if r["asym"]["valid"] else None),
+                       "asym_side": r["asym"]["side"],
+                       "shoulder": bool(r["shoulder"]),
                        "band": r["band"], "confidence": r["conf"],
                        "alternatives": r["alts"]} for r in rows],
             "conclusion": summary + verdict,
@@ -1519,9 +1648,11 @@ def cmd_match(args):
     r_all = float(np.corrcoef(s, r)[0, 1])
     fp = GRID <= 1500
     r_fp = float(np.corrcoef(s[fp], r[fp])[0, 1])
+    r_d1 = deriv_correlation(s, r, 1)
+    r_d2 = deriv_correlation(s, r, 2)
 
-    ps, _ = detect_maxima(s)
-    pr, _ = detect_maxima(r)
+    ps = maxima_subpixel(s)
+    pr = maxima_subpixel(r)
     deltas, unmatched_s = [], []
     for p in ps:
         if len(pr) == 0:
@@ -1556,21 +1687,64 @@ def cmd_match(args):
     regions = regions[:5]
 
     thr_r = args.threshold
+    thr_d = getattr(args, "deriv_threshold", 0.95)
     big_region = any(abs(v) > 0.12 for _, v, _ in regions)
-    if r_all >= thr_r and (np.isnan(max_dev) or max_dev <= 5) and not big_region:
+
+    peaks_ok = np.isnan(max_dev) or max_dev <= 5
+    peaks_mid = np.isnan(max_dev) or max_dev <= 10
+    base_pass = r_all >= thr_r and peaks_ok and not big_region
+    base_warn = r_all >= 0.95 and peaks_mid
+    deriv_ok = (not np.isnan(r_d1)) and r_d1 >= thr_d
+    deriv_poor = (not np.isnan(r_d1)) and r_d1 < 0.90
+
+    if base_pass and deriv_ok:
         verdict = "一致"
-    elif r_all >= 0.95 and (np.isnan(max_dev) or max_dev <= 10):
+    elif base_pass or base_warn or (r_all >= thr_r and deriv_ok):
         verdict = "需复核"
     else:
         verdict = "不一致"
 
+    diag = []
+    if base_pass and not deriv_ok:
+        diag.append("原始谱高度相似但导数谱不符：可能是基线漂移、散射或压片厚度差异"
+                    "被相关系数补偿，也可能是同族不同物被宽包掩盖了精细结构差异")
+    if (not deriv_ok) and peaks_ok and r_all >= thr_r and deltas:
+        mean_shift = float(np.mean(deltas))
+        diag.append(f"原始谱相似、峰位偏差也在限值内，但导数谱不一致："
+                    f"更像系统性峰位偏移（平均 {mean_shift:+.1f} cm⁻¹）或峰宽变化，"
+                    "而非成分差异；如需定量位移，请用 detail 逐带比对")
+    if deriv_ok and (r_all < thr_r or not peaks_ok):
+        diag.append("精细结构一致，但原始谱相关偏低或峰位偏差越限：多与基线、散射或前处理"
+                    "差异有关，建议扣除空白并统一归一化后复评")
+    if big_region:
+        diag.append("存在强差异区（ΔA > 0.12），优先核查该区间是杂质、晶型变化还是配位变化")
+    if (not np.isnan(r_d2)) and (not np.isnan(r_d1)) and r_d2 < r_d1 - 0.25:
+        diag.append("二阶导相关明显低于一阶导：二阶导对噪声更敏感，该项仅作参考")
+    if not diag:
+        diag.append("各判据方向一致，未发现内部矛盾")
+
+    def mark(ok):
+        return "✓" if ok else "✗"
+
+    def fmt(v):
+        return "—" if np.isnan(v) else f"{v:.4f}"
+
     print(f"=== 谱图比对：{sm_path.name}  vs  {ref_path.name} ===")
     print(f"判定：{verdict}\n")
-    print(f"· 全谱相关系数 r = {r_all:.4f}（阈值 {thr_r:.2f}）")
-    print(f"· 指纹区（≤1500）r = {r_fp:.4f}")
-    if not np.isnan(max_dev):
-        print(f"· 峰位最大偏差 {max_dev:.0f} cm⁻¹（限值 ±5）")
-    print(f"· 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个")
+    print("【判据分解】")
+    print(f"  原始谱相关   r   = {r_all:.4f}  {mark(r_all >= thr_r)}（阈值 {thr_r:.2f}）")
+    print(f"  一阶导相关   r'  = {fmt(r_d1)}  {mark(deriv_ok)}（阈值 {thr_d:.2f}）"
+          + ("   ← 精细结构有差异" if deriv_poor else ""))
+    print(f"  二阶导相关   r'' = {fmt(r_d2)}")
+    print(f"  指纹区相关   r_f = {r_fp:.4f}")
+    print(f"  峰位最大偏差     = "
+          f"{'—' if np.isnan(max_dev) else f'{max_dev:.1f} cm⁻¹'}  "
+          f"{mark(peaks_ok)}（限值 ±5）")
+    print(f"  显著差异区       = {len(regions)} 处  {mark(not big_region)}")
+    print("\n【诊断】")
+    for line in diag:
+        print(f"  · {line}")
+    print(f"\n· 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个")
     if regions:
         print("· 主要差异区：")
         for pos, val, w in regions:
@@ -1607,15 +1781,31 @@ def cmd_match(args):
     md = _report(args.outdir, f"{sm_path.stem}_vs_{ref_path.stem}.md", [
         f"# 谱图比对：{sm_path.name} vs {ref_path.name}", "",
         f"**判定：{verdict}**", "",
-        f"- 全谱相关系数 r = {r_all:.4f}（阈值 {thr_r:.2f}）",
-        f"- 指纹区相关系数 r = {r_fp:.4f}",
-        f"- 峰位最大偏差：{'—' if np.isnan(max_dev) else f'{max_dev:.0f} cm⁻¹'}（限值 ±5）",
+        "## 判据", "",
+        "| 判据 | 实测 | 阈值 | 结论 |",
+        "|---|---|---|---|",
+        f"| 原始谱相关 | r = {r_all:.4f} | ≥ {thr_r:.2f} | {mark(r_all >= thr_r)} |",
+        f"| 一阶导相关 | r′ = {fmt(r_d1)} | ≥ {thr_d:.2f} | {mark(deriv_ok)} |",
+        f"| 二阶导相关 | r″ = {fmt(r_d2)} | 参考项 | — |",
+        f"| 指纹区相关 | r_f = {r_fp:.4f} | 参考项 | — |",
+        f"| 峰位最大偏差 | {'—' if np.isnan(max_dev) else f'{max_dev:.1f} cm⁻¹'} "
+        f"| ≤ 5 | {mark(peaks_ok)} |",
+        f"| 显著差异区 | {len(regions)} 处 | 无 ΔA > 0.12 | {mark(not big_region)} |",
+        "", "## 诊断", "",
+        *[f"- {line}" for line in diag],
         f"- 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个",
         "", "## 主要差异区", "",
         *([f"- {pos:.0f} cm⁻¹：{'样品更强' if v > 0 else '对照更强'}（ΔA {v:+.3f}）"
            for pos, v, _ in regions] or ["- 未发现显著差异"]),
-        "", "> 判定阈值说明：相关系数阈值 0.98 为常用经验值，正式检验应按"
-        "中国药典 0402 要求预设并经专属性验证；峰位偏差限值 ±5 cm⁻¹ 引自药典。",
+        "", "## 判据说明", "",
+        "- **原始谱相关**：两谱逐点线性相关，对整体形状敏感，但对基线漂移、散射与膜厚差异也敏感。",
+        "- **一阶导相关**：先求一阶导数再相关，抵消常数基线偏移，只比峰位与峰形；"
+        "这是谱库检索软件中「derivative correlation」的核心思想。",
+        "- **二阶导相关**：同时抵消偏移与斜率，但对噪声敏感，故列为参考项。",
+        "- 两条相关判据方向不一致时，判定降为「需复核」并给出诊断，不强行给结论。",
+        "", "> 阈值说明：相关系数 0.98 与 0.95 为常用经验值，正式检验应按中国药典 0402"
+        " 要求预设并经专属性验证；峰位偏差限值 ±5 cm⁻¹ 引自药典；"
+        "diff 判据 ΔA > 0.12 为本工具设定的显示阈值。",
         "", f"![compare]({png.name})",
     ])
     print(f"\nsaved: {png}\nsaved: {md}")
@@ -1624,8 +1814,13 @@ def cmd_match(args):
             "ok": True, "sample": str(sm_path), "reference": str(ref_path),
             "verdict": verdict,
             "metrics": {"r_full": round(r_all, 4), "r_fingerprint": round(r_fp, 4),
+                        "r_deriv1": None if np.isnan(r_d1) else round(r_d1, 4),
+                        "r_deriv2": None if np.isnan(r_d2) else round(r_d2, 4),
                         "max_peak_deviation": None if np.isnan(max_dev) else round(max_dev, 1),
                         "matched_peaks": len(deltas), "unmatched_peaks": len(unmatched_s)},
+            "criteria": {"base_pass": bool(base_pass), "deriv_pass": bool(deriv_ok),
+                         "r_threshold": thr_r, "deriv_threshold": thr_d},
+            "diagnosis": diag,
             "differences": [{"pos": round(pos, 0), "who": "sample" if v > 0 else "reference",
                              "delta_absorbance": round(v, 3)} for pos, v, _ in regions],
             "report": str(md), "figure": str(png),
@@ -1696,7 +1891,9 @@ def build_parser():
     p8.add_argument("--outdir", "-o", default="output")
     p8.add_argument("--smooth", type=int, default=9)
     p8.add_argument("--threshold", type=float, default=0.98,
-                    help="相关系数判定阈值（默认 0.98）")
+                    help="原始谱相关系数阈值（默认 0.98）")
+    p8.add_argument("--deriv-threshold", type=float, default=0.95,
+                    help="一阶导相关系数阈值（默认 0.95）")
     p8.add_argument("--json", action="store_true", help="同时输出机器可读 JSON")
     p8.set_defaults(func=cmd_match)
     return ap

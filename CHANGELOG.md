@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.4.0] - 2026-11-24
+
+### Added — three analysis capabilities
+
+- **Sub-pixel peak positions**: three-point parabolic apex interpolation, roughly 0.1 cm⁻¹
+  instead of the 2 cm⁻¹ grid. Falls back to the grid value when the apex is not concave or
+  the vertex lies outside the bracket. `match` now reports deviations to 0.1 cm⁻¹.
+- **Peak asymmetry and shoulder detection**: left/right half-width ratio, reported only for
+  FWHM 12–100 cm⁻¹ (narrower has too few samples, broader is a multi-band envelope). A
+  shoulder is flagged only when the ratio ≥ 1.30 *and* a second-derivative maximum exists on
+  the wider side. This replaces the bare FWHM ≥ 80 cm⁻¹ cut-off in the confidence score.
+- **Derivative correlation** in `match`: first- and second-derivative Pearson correlation
+  (SG 15 points, order 3). A verdict now requires both the raw and the derivative criteria;
+  disagreement downgrades to "review" and prints a diagnosis that separates a systematic
+  band shift from a baseline or thickness difference.
+
+### Changed
+
+- `match` output restructured around a per-criterion table plus a diagnosis block
+- confidence deductions distinguish "shoulder confirmed" from "broad but no shoulder"
+- references extended to 20 (ASTM E2310-04, the library-search standard); the READMEs explain
+  why no single score called "HQI" is reported
+- READMEs at all three levels updated for the new columns, flags and criteria
+
+### Verified on measured spectra
+
+| Pair | r | r′ | deviation | verdict |
+|---|---|---|---|---|
+| same spectrum shifted 3 cm⁻¹ | 0.992 | 0.927 | 3.1 cm⁻¹ | review (old rule: consistent) |
+| homologues | 0.9959 | 0.9947 | 1.9 cm⁻¹ | consistent |
+| different compounds | 0.8933 | 0.5787 | 12.4 cm⁻¹ | inconsistent |
+
 ## [0.3.1] - 2026-11-24
 
 ### Changed — documentation rewritten

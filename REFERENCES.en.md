@@ -25,6 +25,7 @@ Every rule in this tool traces back to one of the sources below. IDs are cited i
 | **S17** | SDBS, AIST | Free organic spectra database (IR / Raman / NMR / MS) | [sdbs.db.aist.go.jp](https://sdbs.db.aist.go.jp/) | 2026-11-24 |
 | **S18** | Coblentz Society Spectral Database | Curated professional IR library (subscription) | [coblentz.org](https://www.coblentz.org/) | 2026-11-24 |
 | **S19** | *Indonesian J. Sci. Technol.* **2022**, "Interpretation of FTIR Spectra: A Practical Approach..." | Worked interpretation workflow (functional-group region first, fingerprint second) | [DOI](https://doi.org/10.17509/ijost.v8i1.53297) | 2026-11-24 |
+| **S20** | ASTM E2310-04(2014), *Standard Guide for Use of Spectral Searching by Curve Matching Algorithms with Data Recorded Using Mid-infrared Spectroscopy* | The authoritative guide for mid-IR library searching: HQI has no universal definition and is software-specific; lists Euclidean, correlation and first-derivative Euclidean algorithms; notes that strong bands dominating normalisation mask weak fingerprint bands, and that data points must be aligned first | [astm.org](https://www.astm.org/e2310-04r14.html) | 2026-11-24 |
 
 ## How these shaped the design
 
@@ -40,10 +41,13 @@ Every rule in this tool traces back to one of the sources below. IDs are cited i
 | Deconvolution results are labelled non-unique and never used as absolute percentages | S10, S11 |
 | Saturated spectra or S/N < 3 produce no assignment at all | S5 |
 | Similarity thresholds are preset, adjustable and referenced | S4 |
-
 | A fixed "methodological reading" list in every report (S1/S3/S13/S14/S19) | S13, S14 |
 | A fixed "orthogonal validation" block, tailored to the groups that were proposed | S4, S14, S15 |
 | Literature hits are keyword leads only, explicitly labelled "not the same compound" | S13, S16-S18 |
+| First-derivative correlation added to comparison; disagreement between the two correlation criteria downgrades to "review" | S20 |
+| Peak positions located by three-point parabolic interpolation, falling back to the grid value | S4 (the ±5 cm⁻¹ criterion needs finer position resolution) |
+| Shoulder flag requires both asymmetry and a second-derivative maximum, not a bare FWHM cut-off | S1, S3 |
+| No single score called "HQI": ASTM states HQI has no universal definition | S20 |
 
 ## On "finding the same spectrum in a paper"
 

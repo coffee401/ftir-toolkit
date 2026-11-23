@@ -68,9 +68,20 @@ python ftir.py read sample.txt --peaks 15      # more peaks
 python ftir.py read sample.txt --no-lookup     # skip the online search
 ```
 
-Six sections: peak table (with confidence and competing assignments), conclusion, assignments needing review, orthogonal validation, reference databases, standing caveats.
+Six sections: peak table (with asymmetry, shoulder flag, confidence and competing assignments), conclusion, assignments needing review, orthogonal validation, reference databases, standing caveats.
 
-- Peak-level confidence uses three positive and four negative contributions — see the [decision logic](../README.en.md#decision-logic)
+**Four numeric columns in the peak table**
+
+| Column | Meaning |
+|---|---|
+| Position | Three-point parabolic interpolation, about 0.1 cm⁻¹ (grid is 2 cm⁻¹). Falls back to the grid value when the apex is flat or outside the bracket |
+| FWHM | Half-width at half maximum; used for shape classification and a first guess at composites |
+| Asymmetry | Left/right half-width ratio. 1.00 is symmetric; reported only for FWHM 12–100 cm⁻¹, otherwise `—` |
+| Shoulder | `*` means "ratio ≥ 1.30 **and** a second-derivative maximum on the wider side", i.e. an unresolved component is really there |
+
+- Peak-level confidence uses three positive and five negative contributions — see the [decision logic](../README.en.md#decision-logic)
+- The shoulder flag needs both conditions: asymmetry alone or width alone over-reports
+- Group-level assignments follow a two-evidence rule; a single band yields "suggested" only
 - Group-level assignments follow a two-evidence rule; a single band yields "suggested" only
 - The online search is a lead generator: only titles mentioning both infrared and assignment/interpretation are kept, and timeouts are reported rather than hidden
 
@@ -81,17 +92,34 @@ Output: `<name>_read.md`, `<name>_read.png` (annotation colour encodes confidenc
 ```bash
 python ftir.py match sample.txt reference.txt
 python ftir.py match sample.txt reference.txt --threshold 0.99
+python ftir.py match sample.txt reference.txt --deriv-threshold 0.97
 ```
 
-Three conditions must hold: full-spectrum correlation ≥ threshold, maximum peak deviation ≤ 5 cm⁻¹, and no strong difference band (|ΔA| > 0.12).
+Four criteria, each printed as pass or fail:
 
-| Condition | Verdict |
+| Criterion | Default | What it tests |
+|---|---|---|
+| Raw correlation r | ≥ 0.98 | overall shape agreement |
+| First-derivative correlation r′ | ≥ 0.95 | band positions and shapes with baseline and scatter removed |
+| Maximum peak deviation | ≤ 5 cm⁻¹ | systematic shift of band positions |
+| Strong difference band | none with \|ΔA\| > 0.12 | local compositional or structural change |
+
+| Combination | Verdict |
 |---|---|
-| all three satisfied | consistent |
-| r ≥ 0.95 and peak deviation ≤ 10 cm⁻¹ | review |
+| r, r′, deviation and difference bands all pass | consistent |
+| any of the above fails, or r ≥ 0.95 with deviation ≤ 10 cm⁻¹ | review |
 | otherwise | inconsistent |
 
-Output: `<sample>_vs_<reference>.md` and `.png` (overlay plus difference spectrum with highlighted bands).
+When the two correlation criteria disagree the tool does not force a verdict; it prints a diagnosis. The two common cases:
+
+```
+raw similar, derivative different → systematic band shift or width change, not a compositional difference
+derivative consistent, raw low     → baseline, scatter or thickness difference; re-measure after blank subtraction
+```
+
+**Why derivative correlation matters.** The raw coefficient is diluted by baseline drift, scatter and pellet thickness — the same material prepared differently can fall from 0.999 to 0.95 — while two homologues can reach 0.99 on a shared broad envelope. Differentiation keeps band positions and shapes, which is the idea behind "derivative correlation" in library-search software (see [S20](../REFERENCES.en.md)).
+
+Output: `<sample>_vs_<reference>.md` (criteria table plus diagnosis) and `.png` (overlay plus difference spectrum with highlighted bands).
 
 ### Research commands
 
