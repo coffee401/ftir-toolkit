@@ -11,8 +11,8 @@ DeepSeek Harness 宿主插件，将 `ftir-toolkit` 的能力注册为四个 Agen
 | 工具 | 入参 | 返回 |
 |---|---|---|
 | `ftir_check` | `file` | `verdict`（合格 / 需注意 / 不可用）、`metrics`（信噪比、饱和、水峰、CO₂、基线）、`problems`、`notes`、报告与图路径 |
-| `ftir_read` | `file`、`peaks`（可选）、`lookup`（可选） | `peaks[]`（含 `pos`、`subpixel`、`asymmetry`、`shoulder`、`confidence`、`alternatives`）、`conclusion`、`supported`、`caveats`、`orthogonal`、`databases`、`reading`、`literature`、`risk`、报告与图路径 |
-| `ftir_match` | `sample`、`reference`、`threshold`、`deriv_threshold`（均可选） | `verdict`、`metrics`（原始/一阶导/二阶导/指纹区相关系数、最大峰位偏差、匹配与未匹配峰数）、`criteria`（`base_pass`、`deriv_pass`）、`diagnosis[]`、`differences[]`、报告与图路径 |
+| `ftir_read` | `file`、`peaks`（可选）、`lookup`（可选） | `peaks[]`（含 `pos`、`subpixel`、`asymmetry`、`shoulder`、`confidence`、`alternatives`）、`conclusion`、`supported`、`caveats`、`sensitivity[]`、`orthogonal`、`databases`、`reading`、`literature`、`risk`、报告与图路径 |
+| `ftir_match` | `sample`、`reference`、`threshold`、`deriv_threshold`、`max_shift`（均可选） | `verdict`、`scenario`、`boundary`（结论边界原句）、`metrics`（含 `shift_cm`、`shift_gain`、`shift_verdict`、`aligned`、`r_deriv1_aligned`、`residual_max_cm`）、`criteria`、`diagnosis[]`、`differences[]`、报告与图路径 |
 | `ftir_doctor` | — | Python 版本、解释器路径、`numpy` / `scipy` / `matplotlib` 版本 |
 
 每个工具都在输出目录写入 Markdown 报告与 PNG 图，路径随返回值给出，Agent 可直接读取或展示。
@@ -23,6 +23,10 @@ DeepSeek Harness 宿主插件，将 `ftir-toolkit` 的能力注册为四个 Agen
 - `criteria.deriv_pass`：一阶导相关是否达到阈值；与 `base_pass` 不一致时，`diagnosis` 会说明是「系统性峰位偏移」还是「基线/膜厚差异」
 - `peaks[].shoulder`：`true` 表示该峰较宽一侧确有未分辨组分（不对称比 ≥ 1.30 且二阶导有极大）
 - `peaks[].asymmetry`：`null` 表示该峰过窄或过宽，比值不可靠，不应引用
+- `sensitivity[]`：`verdict` 为「稳定 / 稳定·区间外 / 部分出现 / 位置敏感 / 疑似伪峰」，只有前两种适合写进结论
+- `scenario`：`systematic_shift` / `compositional` / `baseline_or_prep` / `consistent` / `ambiguous`，决定回答时该建议用户做什么
+- `boundary`：结论边界原句，回答中应原样保留，不要改写成更强的断言
+- 所有 JSON 均含 `schema_version` 与 `version`，便于上游做兼容判断
 
 ## 运行要求
 

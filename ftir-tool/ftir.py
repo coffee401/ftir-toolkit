@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import json
+import os
 import pathlib
 import urllib.error
 import urllib.parse
@@ -31,6 +33,9 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
+__version__ = "0.5.0"
+SCHEMA_VERSION = 2
 
 GRID = np.arange(400.0, 4001.0, 2.0)
 
@@ -88,10 +93,18 @@ COLORS = ["#1f3a93", "#c0392b", "#27ae60", "#e67e22", "#8e44ad", "#16a085", "#d3
 
 # ---------------------------------------------------------------- io
 def load_spectrum(path: pathlib.Path):
-    """Return (x, y, is_percent_T)."""
+    """Return (x, y, is_percent_T).
+
+    Ordering, duplicate abscissae and non-finite values are normalised here so
+    that every downstream routine can assume a clean monotonic pair of arrays.
+    Units are taken from the header when present; otherwise an explicit
+    FTIR_Y_UNITS environment variable wins over guessing from magnitudes.
+    """
     text = path.read_text(encoding="utf-8", errors="replace")
     header = "\n".join(l for l in text.splitlines()[:30] if l.startswith("#"))
-    is_pct = "%t" in header.lower() or "transmittance" in header.lower()
+    low = header.lower()
+    is_pct = "%t" in low or "transmittance" in low
+    header_has_unit = is_pct or ("absorb" in low) or "abs" in low
 
     xs, ys = [], []
     for line in text.splitlines():
@@ -111,11 +124,108 @@ def load_spectrum(path: pathlib.Path):
         sys.exit(f"{path.name}: only {len(xs)} data rows parsed - is it two columns (x, y)?")
     x = np.asarray(xs, dtype=float)
     y = np.asarray(ys, dtype=float)
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.all():
+        x, y = x[finite], y[finite]
+        if len(x) < 20:
+            sys.exit(f"{path.name}: fewer than 20 finite rows after cleaning")
+
     order = np.argsort(x)
     x, y = x[order], y[order]
-    if not is_pct and y.max() > 5:  # no header but values look like %T
-        is_pct = True
+    keep = np.concatenate(([True], np.diff(x) > 0))
+    if not keep.all():
+        x, y = x[keep], y[keep]
+
+    forced = os.environ.get("FTIR_Y_UNITS", "").strip().lower()
+    if forced in ("t", "%t", "transmittance", "percent"):
+        return x, y, True
+    if forced in ("abs", "a", "absorbance"):
+        return x, y, False
+
+    if not is_pct and not header_has_unit:
+        peak = float(np.nanmax(y))
+        # Clearly a percentage, clearly an absorbance, or genuinely ambiguous.
+        if peak > 20:
+            is_pct = True
+        elif peak <= 2.5:
+            is_pct = False
+        else:
+            print(f"[输入检查] {path.name}: 未声明单位，y 最大值 {peak:.2f} 处于"
+                  f"「可能是 %T 也可能是吸光度」的区间；已按吸光度处理。"
+                  f"若实际为透射率，请设置 FTIR_Y_UNITS=T 后重跑",
+                  file=sys.stderr)
+            is_pct = False
     return x, y, is_pct
+
+
+def inspect_input(path: pathlib.Path):
+    """Structural checks on the raw file. Returns a list of warning strings.
+
+    These run before any processing so that a malformed file produces an
+    explanation rather than a plausible-looking but wrong spectrum.
+    """
+    warns = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:                      # noqa: BLE001
+        return [f"无法读取文件：{type(e).__name__}"]
+
+    xs, ys = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith(("#", "//", ";", '"')):
+            continue
+        nums = []
+        for tok in re.split(r"[\s,;\t]+", s):
+            try:
+                nums.append(float(tok))
+            except ValueError:
+                pass
+        if len(nums) >= 2:
+            xs.append(nums[0])
+            ys.append(nums[1])
+
+    n = len(xs)
+    if n < 20:
+        return [f"仅解析到 {n} 行两列数据，无法构成谱图"]
+
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
+    n_bad = int(np.sum(~np.isfinite(x) | ~np.isfinite(y)))
+    if n_bad:
+        warns.append(f"有 {n_bad} 行含 NaN/Inf，已剔除")
+    good = np.isfinite(x) & np.isfinite(y)
+    x, y = x[good], y[good]
+
+    n_dup = int(len(x) - len(np.unique(x)))
+    if n_dup:
+        warns.append(f"有 {n_dup} 个重复的波数点，已保留首个")
+
+    xs_sorted = np.sort(x)
+    steps = np.diff(xs_sorted)
+    if len(steps):
+        med = float(np.median(steps))
+        if med <= 0:
+            warns.append("波数间隔非正，数据可能未按波数排列")
+        else:
+            spread = float(np.std(steps) / med)
+            if spread > 0.05:
+                warns.append(f"波数间隔不均匀（中位 {med:.2f}，相对波动 {spread:.0%}），"
+                             "插值后可能引入伪影")
+            if med > 8:
+                warns.append(f"原始波数间隔 {med:.1f} cm⁻¹ 偏大，"
+                             "插值到 2 cm⁻¹ 栅格不会增加真实分辨，峰位与峰宽精度受此限制")
+
+    xmin, xmax = float(xs_sorted[0]), float(xs_sorted[-1])
+    if xmax < 3800 or xmin > 500:
+        warns.append(f"波数覆盖 {xmin:.0f}-{xmax:.0f} cm⁻¹，未覆盖完整的 "
+                     "400-4000 cm⁻¹；区间外的判据不可用")
+
+    if float(np.nanmax(y)) - float(np.nanmin(y)) < 1e-9:
+        warns.append("y 值几乎恒定，可能不是谱图数据")
+
+    return warns
 
 
 # ---------------------------------------------------------------- preprocess
@@ -135,14 +245,20 @@ def als_baseline(y, lam=1e5, p=0.001, niter=12):
 def absorbance_on_grid(path: pathlib.Path, grid=GRID):
     """Raw absorbance (no baseline, no smoothing) resampled onto `grid`."""
     x, y, is_pct = load_spectrum(path)
-    y = np.clip(y, 0.5, None)
-    a = -np.log10(y / 100.0) if is_pct else y
+    if is_pct:
+        # Clipping is only meaningful for transmittance: T near zero would blow
+        # up the logarithm. Absorbance values are already small and must not be
+        # touched, or a 0.02 baseline becomes 0.5 and the spectrum is ruined.
+        y = np.clip(y, 0.5, None)
+        a = -np.log10(y / 100.0)
+    else:
+        a = y
     return np.interp(grid, x, a)
 
 
-def finalize(a, smooth=9):
+def finalize(a, smooth=9, lam=1e5):
     """Baseline-correct (ALS) and smooth an absorbance array."""
-    corr = a - als_baseline(a)
+    corr = a - als_baseline(a, lam=lam)
     if smooth and smooth >= 5:
         smooth = smooth if smooth % 2 else smooth + 1
         corr = savgol_filter(corr, smooth, 3)
@@ -200,24 +316,29 @@ def subpixel_pos(grid, spec, i, max_shift=0.5):
 
 
 def peak_asymmetry(grid, spec, i):
-    """Left and right half-width at half maximum.
+    """Half-widths on the low- and high-wavenumber sides at half maximum.
 
     A symmetric band gives a ratio near 1.0. When one side is markedly wider,
     the band is either composite or carries an unresolved shoulder on that
     side; a single FWHM value cannot express this.
+
+    `grid` may ascend or descend; the sides are labelled by wavenumber, not by
+    array index.
     """
     try:
         _, _, lip, rip = peak_widths(spec, [i], rel_height=0.5)
     except Exception:
         return None
     dx = abs(float(grid[1] - grid[0]))
-    left = (i - float(lip[0])) * dx       # high-wavenumber side
-    right = (float(rip[0]) - i) * dx      # low-wavenumber side
-    if left <= 0 or right <= 0:
+    lower_idx = (i - float(lip[0])) * dx      # side with the smaller index
+    higher_idx = (float(rip[0]) - i) * dx     # side with the larger index
+    if lower_idx <= 0 or higher_idx <= 0:
         return None
-    ratio = max(left, right) / min(left, right)
-    return {"left": left, "right": right, "ratio": ratio,
-            "side": "高波数侧" if left > right else "低波数侧"}
+    ascending = float(grid[-1]) > float(grid[0])
+    low_w, high_w = (lower_idx, higher_idx) if ascending else (higher_idx, lower_idx)
+    ratio = max(low_w, high_w) / min(low_w, high_w)
+    return {"low_side": low_w, "high_side": high_w, "ratio": ratio,
+            "side": "高波数侧" if high_w > low_w else "低波数侧"}
 
 
 def shoulder_on_side(spec, grid, i, asym, d2=None, search_cm=45, min_frac=0.04,
@@ -233,16 +354,16 @@ def shoulder_on_side(spec, grid, i, asym, d2=None, search_cm=45, min_frac=0.04,
         return False
     if d2 is None:
         d2 = second_derivative(spec, grid)
-    dx = abs(float(grid[1] - grid[0]))
-    k = max(int(search_cm / dx), 3)
-    if asym["side"] == "高波数侧":        # indices before i (grid is descending)
-        lo, hi = max(0, i - k), i - 1
+    center = float(grid[i])
+    # Select by wavenumber so the search does not depend on grid orientation.
+    if asym["side"] == "高波数侧":
+        m = (grid > center) & (grid <= center + search_cm)
     else:
-        lo, hi = i + 1, min(len(spec) - 1, i + k)
-    if hi - lo < 2:
+        m = (grid < center) & (grid >= center - search_cm)
+    if int(m.sum()) < 3:
         return False
-    seg = d2[lo:hi + 1]
-    if seg.size == 0 or float(seg.max()) <= 0:
+    seg = d2[m]
+    if float(seg.max()) <= 0:
         return False
     pk, _ = find_peaks(seg, prominence=max(float(seg.max()) * min_frac, 1e-9))
     return bool(len(pk))
@@ -266,15 +387,92 @@ def deriv_correlation(s, r, order=1, window=15):
     return float(np.corrcoef(ds, dr)[0, 1])
 
 
+def align_spectrum(spec, grid, shift):
+    """Return `spec` resampled at (grid - shift), i.e. translated by `shift`.
+
+    Outside the original range the array is filled with the edge value, so the
+    caller should compare only the overlapping region. Handles either grid
+    orientation.
+    """
+    if shift == 0 or not np.isfinite(shift):
+        return spec.copy()
+    if float(grid[0]) <= float(grid[-1]):      # ascending
+        return np.interp(grid - shift, grid, spec)
+    return np.interp(grid - shift, grid[::-1], spec[::-1])
+
+
+def estimate_shift(s, r, grid=GRID, max_shift_cm=15.0, step_cm=0.25, order=1):
+    """Estimate a global wavenumber offset between two spectra.
+
+    Works on derivative spectra so that broad envelopes (which dominate the raw
+    correlation) contribute little, and searches a bounded grid rather than
+    using FFT lags so the sign convention is explicit and testable.
+
+    Returns a dict:
+      shift       - translation to apply to `r` so it lines up with `s`;
+                    positive means the sample bands sit at higher wavenumber
+      gain        - how much the derivative correlation improves at that shift
+      at_boundary - True when the optimum sits at the edge of the search window,
+                    which usually means the two spectra are unrelated rather
+                    than offset
+      verdict     - "none" | "offset" | "unreliable"
+    """
+    out = {"shift": 0.0, "gain": 0.0, "at_boundary": False,
+           "searched": False, "verdict": "none"}
+    if len(s) < 32 or not np.isfinite(max_shift_cm) or max_shift_cm <= 0:
+        return out
+    ds = savgol_filter(s, 15, 3, deriv=order, delta=1.0)
+    dr = savgol_filter(r, 15, 3, deriv=order, delta=1.0)
+    if float(np.std(ds)) < 1e-12 or float(np.std(dr)) < 1e-12:
+        return out
+
+    base = float(np.corrcoef(ds, dr)[0, 1])
+    best_shift, best_corr = 0.0, base
+    for sh in np.arange(-max_shift_cm, max_shift_cm + 1e-9, step_cm):
+        rr = align_spectrum(dr, grid, float(sh))
+        c = float(np.corrcoef(ds, rr)[0, 1])
+        if np.isfinite(c) and c > best_corr:
+            best_shift, best_corr = float(sh), c
+
+    gain = float(best_corr - base)
+    at_boundary = abs(best_shift) >= 0.9 * max_shift_cm
+    out.update(shift=best_shift, gain=gain, at_boundary=at_boundary, searched=True)
+
+    # A shift is only claimed when the improvement is material and the optimum
+    # is interior. Otherwise an unrelated pair can always "find" an offset.
+    if at_boundary:
+        out["verdict"] = "unreliable"
+        out["shift"] = 0.0
+    elif gain >= 0.03 and abs(best_shift) >= 0.5:
+        out["verdict"] = "offset"
+    else:
+        out["verdict"] = "none"
+        out["shift"] = 0.0
+    return out
+
+
 def detect_maxima(spec, grid=GRID, prominence=0.015):
     idx, _ = find_peaks(spec, prominence=prominence, distance=3)
     return grid[idx], spec[idx]
 
 
-def maxima_subpixel(spec, grid=GRID, prominence=0.015):
-    """Peak positions with parabolic apex interpolation (about 0.1 cm-1)."""
+def maxima_subpixel(spec, grid=GRID, prominence=0.015, max_fwhm=None):
+    """Peak positions with parabolic apex interpolation (about 0.1 cm-1).
+
+    `max_fwhm` drops broad envelopes. A band hundreds of cm-1 wide has its apex
+    set by the baseline, not by the chemistry, so including it in a peak-position
+    comparison produces large spurious deviations.
+    """
     idx, _ = find_peaks(spec, prominence=prominence, distance=3)
-    return np.array([subpixel_pos(grid, spec, int(i))[0] for i in idx], dtype=float)
+    dx = abs(float(grid[1] - grid[0]))
+    out = []
+    for i in idx:
+        if max_fwhm is not None:
+            w = float(peak_widths(spec, [int(i)], rel_height=0.5)[0][0]) * dx
+            if w > max_fwhm:
+                continue
+        out.append(subpixel_pos(grid, spec, int(i))[0])
+    return np.array(out, dtype=float)
 
 
 def nearest_max(spec, center, tol, grid=GRID, maxima=None):
@@ -376,6 +574,29 @@ def metrics_for(spec, grid=GRID):
     }
 
 
+KEY_METRICS = ["oh_fwhm", "dcoo", "a_oh", "a_co", "as_sym"]
+
+
+def metrics_range(path, smooth, subtract=None, factor="1.0"):
+    """Span of every metric across the sensitivity parameter sets.
+
+    A single number hides how much of it is decided by the smoothing window;
+    the span makes that visible without asking the user to run anything twice.
+    """
+    runs = []
+    for cfg in SENSITIVITY_SETTINGS:
+        spec = _prepare([str(path)], cfg["smooth"], subtract, factor,
+                        normalize_specs=True, lam=cfg["lam"], quiet=True)[0]
+        runs.append(metrics_for(spec))
+    out = {}
+    for k, _ in METRIC_COLS:
+        vals = np.array([r[k] for r in runs], dtype=float)
+        vals = vals[np.isfinite(vals)]
+        out[k] = ((float(vals.min()), float(vals.max()), float(vals.max() - vals.min()))
+                  if vals.size else (float("nan"), float("nan"), float("nan")))
+    return out
+
+
 METRIC_COLS = [
     ("oh_center", "O-H cog"),
     ("oh_fwhm", "O-H FWHM"),
@@ -410,6 +631,7 @@ def fig_single(grid, spec, peaks, out, title=""):
     ax.set_title(title or "FT-IR spectrum", fontsize=10)
     _clean(ax, grid)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -426,6 +648,7 @@ def fig_compare(grid, specs, labels, out):
     ax.set_title("FT-IR comparison", fontsize=10)
     _clean(ax, grid)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -456,6 +679,7 @@ def fig_deriv(grid, specs, labels, out):
         for s in ("top", "right", "left"):
             ax.spines[s].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -479,6 +703,7 @@ def fig_ratios(labels, metrics, out):
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -504,6 +729,7 @@ def fig_trend(labels, metrics, radii, out):
         ax.spines[s].set_visible(False)
         ax2.spines[s].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -615,6 +841,7 @@ def fig_deconv(res, out, title=""):
         for s in ("top", "right"):
             a.spines[s].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
@@ -859,15 +1086,17 @@ def fig_qc(q, out, title=""):
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(out)
     plt.close(fig)
 
 
 # ---------------------------------------------------------------- commands
-def _prepare(files, smooth, subtract=None, factor="1.0", normalize_specs=True):
+def _prepare(files, smooth, subtract=None, factor="1.0", normalize_specs=True,
+             lam=1e5, quiet=False):
     """Load, optionally subtract a reference spectrum, baseline-correct."""
     ref = absorbance_on_grid(pathlib.Path(subtract)) if subtract else None
-    if ref is not None:
+    if ref is not None and not quiet:
         mode = "auto" if str(factor).lower() == "auto" else f"{float(factor):.2f}x"
         print(f"reference: {pathlib.Path(subtract).name} ({mode})")
     specs = []
@@ -876,10 +1105,11 @@ def _prepare(files, smooth, subtract=None, factor="1.0", normalize_specs=True):
         if ref is not None:
             fac = auto_sub_factor(a, ref) if str(factor).lower() == "auto" else float(factor)
             a = a - fac * ref
-            print(f"  {pathlib.Path(f).name}: factor = {fac:.3f}")
-        final = finalize(a, smooth)
+            if not quiet:
+                print(f"  {pathlib.Path(f).name}: factor = {fac:.3f}")
+        final = finalize(a, smooth, lam=lam)
         specs.append(normalize(final) if normalize_specs else final)
-    if ref is not None:
+    if ref is not None and not quiet:
         print()
     return specs
 
@@ -985,6 +1215,34 @@ def cmd_detail(args):
         w.writerow(["metric"] + labels)
         for k, _ in METRIC_COLS:
             w.writerow([k] + [f"{m[k]:.3f}" for m in mets])
+    ranges = []
+    if getattr(args, "sensitivity", True):
+        ranges = [metrics_range(f, args.smooth, args.subtract, args.sub_factor)
+                  for f in args.files]
+        print("\n【跨参数范围】平滑 7/9/11 × 基线 λ 1e5/1e6，共 3 组")
+        print(f"  {'indicator':<12}{'sample':<14}{'value':>9}{'range':>19}{'rel':>8}")
+        print("  " + "-" * 62)
+        name_map = dict(METRIC_COLS)
+        for k in KEY_METRICS:
+            for lab, m, rg in zip(labels, mets, ranges):
+                lo, hi, sp = rg[k]
+                rng = "—" if not np.isfinite(lo) else f"{lo:.1f} – {hi:.1f}"
+                rel = (sp / abs(m[k]) * 100) if (m[k] and np.isfinite(sp)) else float("nan")
+                rel_txt = "—" if not np.isfinite(rel) else f"{rel:.0f}%"
+                print(f"  {name_map[k]:<12}{lab:<14}{m[k]:>9.2f}{rng:>19}{rel_txt:>8}")
+        print("  rel = 跨参数波动占主值的比例。>10% 的指标不宜逐位引用，"
+              "只宜作趋势比较；≈0 的指标可放心引用")
+
+        rng_csv = out / "metrics_range.csv"
+        with open(rng_csv, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            w.writerow(["sample", "metric", "value", "min", "max", "span"])
+            for lab, m, rg in zip(labels, mets, ranges):
+                for k, _ in METRIC_COLS:
+                    lo, hi, sp = rg[k]
+                    w.writerow([lab, k, f"{m[k]:.3f}", f"{lo:.3f}", f"{hi:.3f}", f"{sp:.3f}"])
+        print(f"saved: {rng_csv}")
+
     fig_deriv(GRID, specs, labels, out / "second_derivative.png")
     fig_ratios(labels, mets, out / "ratios.png")
     print(f"\nsaved: {csv_path}")
@@ -1072,6 +1330,76 @@ def cmd_deconv(args):
     print(f"\nsaved: {csv_path}\nsaved: {png_path}")
 
 
+# Parameter sets used to test whether a conclusion survives reasonable changes.
+# All three are defensible: 9 points/1e5 is the default, 7 points keeps sharper
+# detail, 11 points/1e6 over-smooths and over-flattens on purpose.
+SENSITIVITY_SETTINGS = [
+    {"smooth": 7, "lam": 1e5, "tag": "smooth 7 / λ 1e5"},
+    {"smooth": 9, "lam": 1e5, "tag": "default (9 / 1e5)"},
+    {"smooth": 11, "lam": 1e6, "tag": "smooth 11 / λ 1e6"},
+]
+
+
+def sensitivity_report(path, base_smooth, subtract=None, factor="1.0",
+                       tol_cm=4.0, q_base=None):
+    """Re-run peak picking under several parameter sets and classify peaks.
+
+    A peak that only exists under one smoothing choice is not a finding; a peak
+    whose position moves by more than `tol_cm` is not quotable at 0.1 cm⁻¹.
+    Returns (rows, notes).
+    """
+    runs = []
+    for cfg in SENSITIVITY_SETTINGS:
+        spec = _prepare([str(path)], cfg["smooth"], subtract, factor,
+                        normalize_specs=False, lam=cfg["lam"], quiet=True)[0]
+        rows = _peak_rows(spec, max_n=24, q=q_base)
+        runs.append((cfg["tag"], rows))
+
+    ref_rows = runs[1][1] if len(runs) > 1 else runs[0][1]
+    out, notes = [], []
+    for r in ref_rows:
+        seen, positions, widths = [], [], []
+        for tag, rows in runs:
+            if not rows:
+                continue
+            pos = np.array([x["pos"] for x in rows])
+            j = int(np.argmin(np.abs(pos - r["pos"])))
+            if abs(float(pos[j]) - r["pos"]) <= tol_cm:
+                seen.append(tag)
+                positions.append(float(pos[j]))
+                widths.append(float(rows[j]["fwhm"]))
+        n = len(seen)
+        spread = (max(positions) - min(positions)) if positions else float("inf")
+        unassigned = (not r["band"]) or r["band"] == "未归类"
+        # 1.5 cm-1 is under one grid step; anything larger is a real change of
+        # position rather than interpolation noise.
+        if n == len(runs) and spread <= 1.5:
+            verdict = "稳定·区间外" if unassigned else "稳定"
+        elif n >= 2:
+            if spread > 1.5:
+                verdict = "位置敏感"
+            else:
+                verdict = "部分出现"
+        else:
+            verdict = "疑似伪峰"
+        if unassigned and verdict != "稳定·区间外":
+            verdict += "·区间外"
+        out.append({
+            "pos": r["pos"], "band": r["band"], "conf": r["conf"],
+            "verdict": verdict, "n": n, "total": len(runs),
+            "pos_range": (min(positions), max(positions)) if positions else (np.nan, np.nan),
+            "fwhm_range": (min(widths), max(widths)) if widths else (np.nan, np.nan),
+            "usable": verdict.startswith("稳定"),
+        })
+
+    n_stable = sum(1 for x in out if x["verdict"].startswith("稳定"))
+    n_suspect = sum(1 for x in out if "伪峰" in x["verdict"])
+    notes.append(f"三组参数下 {n_stable}/{len(out)} 个峰位置稳定（位移 ≤ 1.5 cm⁻¹）")
+    if n_suspect:
+        notes.append(f"其中 {n_suspect} 个峰仅在单组参数下出现，判为疑似伪峰")
+    return out, notes
+
+
 def _confidence(pos, rel, fwhm, d, q, asym=None, shoulder=False):
     """Grade a single assignment. Returns (level, reasons)."""
     if d is None:
@@ -1127,7 +1455,7 @@ def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02, q=None):
         # beyond ~100 cm-1 the envelope is a composite of several bands, so a
         # single half-width carries no interpretable meaning and is suppressed.
         if asym is None or w < 12 or w >= 100:
-            asym = {"left": float("nan"), "right": float("nan"),
+            asym = {"low_side": float("nan"), "high_side": float("nan"),
                     "ratio": float("nan"), "side": "—", "valid": False}
         else:
             asym["valid"] = True
@@ -1419,12 +1747,65 @@ def orthogonal_advice(supported, q=None):
     return tips
 
 
-def _report(outdir, name, lines):
+_ACTIVE_PARAMS: dict = {}
+
+
+def _report(outdir, name, lines, params=None):
+    """Write a Markdown report, stamped with version, timestamp and parameters.
+
+    The stamp is what makes a printed report traceable: without it, two reports
+    that differ only by smoothing window look identical on paper.
+    """
     out = pathlib.Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     p = out / name
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    stamp = [f"<!-- ftir-toolkit {__version__} / schema {SCHEMA_VERSION} -->", ""]
+    body = []
+    if lines and lines[0].startswith("# "):
+        body = [lines[0], ""]
+        rest = lines[1:]
+    else:
+        rest = lines
+    params = _ACTIVE_PARAMS if params is None else params
+    meta = [f"> ftir-toolkit **{__version__}**（schema {SCHEMA_VERSION}）"
+            f" · 生成于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"]
+    if params:
+        meta.append("> 参数：" + "，".join(f"{k}={v}" for k, v in params.items()))
+    p.write_text("\n".join(stamp + body + meta + [""] + list(rest)) + "\n",
+                 encoding="utf-8")
     return p
+
+
+DEFAULT_PARAMS = {"sub_factor": "1.0"}
+
+
+def param_summary(args, keys=("smooth", "subtract", "sub_factor", "threshold",
+                              "deriv_threshold", "max_shift", "peaks", "region")):
+    """Collect the processing parameters that affect the numbers in a report."""
+    out = {}
+    for k in keys:
+        v = getattr(args, k, None)
+        if v in (None, ""):
+            continue
+        if k in DEFAULT_PARAMS and str(v) == DEFAULT_PARAMS[k]:
+            continue
+        if k == "no_align" and not v:
+            continue
+        out[k.replace("_", "-")] = v
+    if getattr(args, "no_align", False):
+        out["no-align"] = True
+    return out
+
+
+def stamp_figure(fig, note=""):
+    """Write the version (and an optional note) into the lower-right corner.
+
+    A figure pasted into a thesis loses every piece of metadata the report
+    carries, so the version travels with the image itself.
+    """
+    txt = f"ftir-toolkit {__version__}" + (f" · {note}" if note else "")
+    fig.text(0.995, 0.004, txt, ha="right", va="bottom",
+             fontsize=5, color="#95a5a6")
 
 
 def cmd_check(args):
@@ -1465,6 +1846,7 @@ def cmd_check(args):
     print(f"\nsaved: {png}\nsaved: {md}")
     if getattr(args, "json", False):
         print(json.dumps({
+            "schema_version": SCHEMA_VERSION, "version": __version__,
             "ok": True, "file": str(path), "verdict": level,
             "metrics": {"snr": round(q["snr"], 1),
                         "saturated": bool(q["saturated"]),
@@ -1495,6 +1877,21 @@ def cmd_read(args):
 
     summary, verdict, caveat, supported = build_conclusion(rows, q)
     review = [r for r in rows if r["conf"] != "高"]
+
+    sens, sens_notes = [], []
+    if getattr(args, "sensitivity", True) and not q.get("saturated"):
+        sens, sens_notes = sensitivity_report(path, args.smooth, args.subtract,
+                                              args.sub_factor, q_base=q)
+
+    sens_rows_md = []
+    for x in sens:
+        lo, hi = x["pos_range"]
+        pos_rng = "—" if not np.isfinite(lo) else f"{lo:.0f}-{hi:.0f}"
+        fl, fh = x["fwhm_range"]
+        wid_rng = "—" if not np.isfinite(fl) else f"{fl:.0f}-{fh:.0f}"
+        sens_rows_md.append(
+            f"| {x['pos']:.1f} | {x['band']} | {x['n']}/{x['total']} | "
+            f"{pos_rng} | {wid_rng} | {x['verdict']} |")
 
     print(f"=== 谱图解析：{path.name} ===")
     print(f"{'峰位':>7} {'强度':>4} {'峰形':>4} {'FWHM':>6} {'不对称':>7} {'可信度':>5}  参考归属")
@@ -1548,6 +1945,20 @@ def cmd_read(args):
             for w in r["why"]:
                 print(f"    - {w}")
 
+    if sens:
+        print("\n【参数敏感性】三组合理参数下重算峰表：")
+        for n in sens_notes:
+            print(f"  · {n}")
+        unsteady = [x for x in sens if not x["usable"]]
+        if unsteady:
+            print("  不宜直接引用的峰：")
+            for x in unsteady[:6]:
+                lo, hi = x["pos_range"]
+                rng = (f"，位置 {lo:.0f}-{hi:.0f} cm⁻¹"
+                       if np.isfinite(lo) and np.isfinite(hi) else "")
+                print(f"    {x['pos']:.0f} cm⁻¹ {x['band']}"
+                      f"（{x['verdict']}，出现在 {x['n']}/{x['total']} 组{rng}）")
+
     print("\n【可信度声明】")
     for line in RISK_LINES:
         print(f"  · {line.replace('**', '')}")
@@ -1572,6 +1983,7 @@ def cmd_read(args):
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(png)
     plt.close(fig)
 
@@ -1605,6 +2017,14 @@ def cmd_read(args):
            *[f"- {h['title']}（{h['source']} {h['year']}）"
              + (f" [链接]({h['url']})" if h["url"] else "") for h in hits], ""]
           if hits else []),
+        *(["## 参数敏感性", "",
+           "> 同一文件在三组合理参数下重算（平滑 7/9/11，基线 λ 1e5/1e6）。"
+           "只有跨参数稳定的峰才适合写进结论。", "",
+           *[f"- {n}" for n in sens_notes], "",
+           "| 峰位 (cm⁻¹) | 参考归属 | 出现组数 | 位置范围 | FWHM 范围 | 判定 |",
+           "|---|---|---|---|---|---|",
+           *sens_rows_md,
+           ""] if sens else []),
         "## 可信度声明", "",
         *[f"{i}. {line}" for i, line in enumerate(RISK_LINES, 1)],
         "", "## 局限", "",
@@ -1616,6 +2036,7 @@ def cmd_read(args):
     print(f"\nsaved: {png}\nsaved: {md}")
     if getattr(args, "json", False):
         print(json.dumps({
+            "schema_version": SCHEMA_VERSION, "version": __version__,
             "ok": True, "file": str(path),
             "peaks": [{"pos": round(r["pos"], 1), "grid_pos": round(r["grid_pos"], 1),
                        "subpixel": bool(r["precise"]),
@@ -1630,6 +2051,19 @@ def cmd_read(args):
             "conclusion": summary + verdict,
             "supported": supported,
             "caveats": caveat,
+            "sensitivity": [{"pos": round(x["pos"], 1), "band": x["band"],
+                             "verdict": x["verdict"],
+                             "groups": f"{x['n']}/{x['total']}",
+                             "pos_range": [None if not np.isfinite(x["pos_range"][0])
+                                           else round(x["pos_range"][0], 1),
+                                           None if not np.isfinite(x["pos_range"][1])
+                                           else round(x["pos_range"][1], 1)],
+                             "fwhm_range": [None if not np.isfinite(x["fwhm_range"][0])
+                                            else round(x["fwhm_range"][0], 1),
+                                            None if not np.isfinite(x["fwhm_range"][1])
+                                            else round(x["fwhm_range"][1], 1)]}
+                            for x in sens],
+            "sensitivity_notes": sens_notes,
             "orthogonal": advice,
             "databases": [{"name": n, "url": u} for n, u in DATABASES],
             "reading": [{"title": t, "url": u} for t, u in CURATED_READING],
@@ -1640,118 +2074,203 @@ def cmd_read(args):
         }, ensure_ascii=False, indent=2))
 
 
-def cmd_match(args):
-    sm_path, ref_path = pathlib.Path(args.sample), pathlib.Path(args.reference)
-    s = normalize(finalize(absorbance_on_grid(sm_path), args.smooth))
-    r = normalize(finalize(absorbance_on_grid(ref_path), args.smooth))
-
-    r_all = float(np.corrcoef(s, r)[0, 1])
-    fp = GRID <= 1500
-    r_fp = float(np.corrcoef(s[fp], r[fp])[0, 1])
-    r_d1 = deriv_correlation(s, r, 1)
-    r_d2 = deriv_correlation(s, r, 2)
-
-    ps = maxima_subpixel(s)
-    pr = maxima_subpixel(r)
-    deltas, unmatched_s = [], []
+def pair_peaks(ps, pr, tol=15.0):
+    """Pair each sample peak with the nearest reference peak within `tol`."""
+    deltas, unmatched = [], []
     for p in ps:
         if len(pr) == 0:
-            unmatched_s.append(p)
+            unmatched.append(float(p))
             continue
         j = int(np.argmin(np.abs(pr - p)))
-        if abs(pr[j] - p) <= 15:
-            deltas.append(p - pr[j])
+        if abs(pr[j] - p) <= tol:
+            deltas.append(float(p - pr[j]))
         else:
-            unmatched_s.append(p)
-    max_dev = float(np.max(np.abs(deltas))) if deltas else float("nan")
+            unmatched.append(float(p))
+    return deltas, unmatched
 
-    d = s - r
+
+def difference_regions(d, grid=GRID, min_width=3, max_n=5):
+    """Contiguous spans where |difference| exceeds a local noise floor."""
     local_noise = 1.4826 * float(np.median(np.abs(d - np.median(d))))
     thr = max(0.06, 3 * local_noise)
     hits = np.abs(d) > thr
-    regions = []
-    i = 0
+    regions, i = [], 0
     while i < len(hits):
         if hits[i]:
             j = i
             while j + 1 < len(hits) and hits[j + 1]:
                 j += 1
-            if j - i >= 3:
+            if j - i >= min_width:
                 seg = d[i:j + 1]
                 k = int(np.argmax(np.abs(seg)))
-                regions.append((float(GRID[i + k]), float(seg[k]), int(j - i + 1)))
+                regions.append((float(grid[i + k]), float(seg[k]), int(j - i + 1)))
             i = j + 1
         else:
             i += 1
     regions.sort(key=lambda t: -abs(t[1]))
-    regions = regions[:5]
+    return regions[:max_n]
 
+
+SCENARIO_TEXT = {
+    "systematic_shift": (
+        "系统性波数偏移：位移校正后一阶导相关明显恢复、峰位残差收窄，"
+        "说明谱带形状本身一致，差异来自整体位移而非成分不同。"
+        "建议按聚苯乙烯薄膜校验波数准确度（3000 cm⁻¹ 处 ±5、1000 cm⁻¹ 处 ±1），"
+        "确认两谱采集日期与仪器状态，校准后复测再作最终判定"),
+    "compositional": (
+        "位移校正后一阶导相关仍未达标，且强差异区集中：提示成分、相互作用或"
+        "结构状态不同（如配位方式改变、混入其他组分、晶型与无定形之别）"),
+    "baseline_or_prep": (
+        "导数谱一致而原始谱相关偏低：更可能是基线、散射、压片厚度或制样方式差异，"
+        "而非物质不同。建议扣除空白并统一归一化后复评"),
+    "consistent": "各项判据方向一致，未发现显著差异",
+    "ambiguous": (
+        "多处判据处于临界或相互矛盾，不足以支撑单一结论；"
+        "建议检查制样一致性、波数校准与信噪比后复测"),
+}
+
+BOUNDARY_TEXT = {
+    "一致": "在本方法及当前阈值下未发现显著差异；不等同于化合物身份确证。",
+    "需复核": "判据未能一致通过，或差异已定位但尚未消除；不建议据此判定为同一物质。",
+    "不一致": "至少一项核心判据明显不满足，提示两谱并非同一物质或同一状态。",
+}
+
+
+def cmd_match(args):
+    sm_path, ref_path = pathlib.Path(args.sample), pathlib.Path(args.reference)
+    s = normalize(finalize(absorbance_on_grid(sm_path), args.smooth))
+    r = normalize(finalize(absorbance_on_grid(ref_path), args.smooth))
+    grid = GRID
     thr_r = args.threshold
-    thr_d = getattr(args, "deriv_threshold", 0.95)
+    thr_d = args.deriv_threshold
+
+    # ---------- raw metrics
+    r_all = float(np.corrcoef(s, r)[0, 1])
+    fp = grid <= 1500
+    r_fp = float(np.corrcoef(s[fp], r[fp])[0, 1])
+    r_d1 = deriv_correlation(s, r, 1)
+    r_d2 = deriv_correlation(s, r, 2)
+
+    # Broad envelopes are excluded from position matching: their apex moves with
+    # the baseline, which would be read as a peak shift.
+    ps = maxima_subpixel(s, max_fwhm=100.0)
+    pr = maxima_subpixel(r, max_fwhm=100.0)
+    deltas, unmatched_s = pair_peaks(ps, pr)
+    max_dev = float(np.max(np.abs(deltas))) if deltas else float("nan")
+
+    regions = difference_regions(s - r, grid)
     big_region = any(abs(v) > 0.12 for _, v, _ in regions)
 
-    peaks_ok = np.isnan(max_dev) or max_dev <= 5
-    peaks_mid = np.isnan(max_dev) or max_dev <= 10
-    base_pass = r_all >= thr_r and peaks_ok and not big_region
-    base_warn = r_all >= 0.95 and peaks_mid
-    deriv_ok = (not np.isnan(r_d1)) and r_d1 >= thr_d
-    deriv_poor = (not np.isnan(r_d1)) and r_d1 < 0.90
+    # ---------- global shift estimation, then re-align
+    shift = estimate_shift(s, r, grid, max_shift_cm=args.max_shift)
+    use_align = (shift["verdict"] == "offset") and not args.no_align
+    if use_align:
+        r_al = align_spectrum(r, grid, shift["shift"])
+        r_d1_al = deriv_correlation(s, r_al, 1)
+        r_d2_al = deriv_correlation(s, r_al, 2)
+        deltas_al, _ = pair_peaks(ps, maxima_subpixel(r_al, max_fwhm=100.0))
+        resid = float(np.max(np.abs(deltas_al))) if deltas_al else float("nan")
+        regions_al = difference_regions(s - r_al, grid)
+        big_region_al = any(abs(v) > 0.12 for _, v, _ in regions_al)
+    else:
+        r_al = r
+        r_d1_al, r_d2_al = r_d1, r_d2
+        resid = max_dev
+        regions_al, big_region_al = regions, big_region
 
-    if base_pass and deriv_ok:
+    # ---------- verdict from the aligned metrics (independent peak residual)
+    def passed(v, thr):
+        return (not np.isnan(v)) and v >= thr
+
+    aligned_ok = passed(r_d1_al, thr_d)
+    raw_ok = passed(r_all, thr_r)
+    resid_ok = np.isnan(resid) or resid <= 5
+    resid_mid = np.isnan(resid) or resid <= 10
+    # Needed a shift before it passed: the spectra agree in shape but sit at
+    # different wavenumbers, which is a finding to report, not a clean pass.
+    # An adopted correction means the two spectra are not on the same wavenumber
+    # scale. That is a finding in itself, even if the corrected metrics pass.
+    # Sub-cm-1 adjustments are grid alignment, not a systematic offset.
+    needed_shift = use_align and abs(shift["shift"]) >= 1.0
+
+    if aligned_ok and resid_ok and not big_region_al and not needed_shift:
         verdict = "一致"
-    elif base_pass or base_warn or (r_all >= thr_r and deriv_ok):
+    elif aligned_ok and resid_mid:
+        verdict = "需复核"
+    elif raw_ok and resid_mid and not big_region:
         verdict = "需复核"
     else:
         verdict = "不一致"
 
-    diag = []
-    if base_pass and not deriv_ok:
-        diag.append("原始谱高度相似但导数谱不符：可能是基线漂移、散射或压片厚度差异"
-                    "被相关系数补偿，也可能是同族不同物被宽包掩盖了精细结构差异")
-    if (not deriv_ok) and peaks_ok and r_all >= thr_r and deltas:
-        mean_shift = float(np.mean(deltas))
-        diag.append(f"原始谱相似、峰位偏差也在限值内，但导数谱不一致："
-                    f"更像系统性峰位偏移（平均 {mean_shift:+.1f} cm⁻¹）或峰宽变化，"
-                    "而非成分差异；如需定量位移，请用 detail 逐带比对")
-    if deriv_ok and (r_all < thr_r or not peaks_ok):
-        diag.append("精细结构一致，但原始谱相关偏低或峰位偏差越限：多与基线、散射或前处理"
-                    "差异有关，建议扣除空白并统一归一化后复评")
-    if big_region:
-        diag.append("存在强差异区（ΔA > 0.12），优先核查该区间是杂质、晶型变化还是配位变化")
-    if (not np.isnan(r_d2)) and (not np.isnan(r_d1)) and r_d2 < r_d1 - 0.25:
+    # ---------- scenario
+    if needed_shift and resid_ok:
+        scenario = "systematic_shift"
+    elif (not aligned_ok) and big_region_al:
+        scenario = "compositional"
+    elif aligned_ok and not raw_ok:
+        scenario = "baseline_or_prep"
+    elif verdict == "一致":
+        scenario = "consistent"
+    else:
+        scenario = "ambiguous"
+
+    diag = [SCENARIO_TEXT[scenario]]
+    if shift["verdict"] == "unreliable":
+        diag.append("位移搜索触界，无法确认是否存在整体偏移；两谱可能差异过大，"
+                    "位移校正未采用")
+    if use_align:
+        diag.append(f"位移校正量 {shift['shift']:+.2f} cm⁻¹（一阶导相关 "
+                    f"{r_d1:.3f} → {r_d1_al:.3f}）")
+    if (not np.isnan(r_d2_al)) and (not np.isnan(r_d1_al)) and r_d2_al < r_d1_al - 0.25:
         diag.append("二阶导相关明显低于一阶导：二阶导对噪声更敏感，该项仅作参考")
-    if not diag:
-        diag.append("各判据方向一致，未发现内部矛盾")
+    if big_region_al and scenario != "compositional":
+        diag.append("仍存在强差异区（ΔA > 0.12），建议用 detail 逐带核对")
 
-    def mark(ok):
-        return "✓" if ok else "✗"
+    if shift["verdict"] == "unreliable":
+        shift_txt = "未采用（搜索触界）"
+    elif use_align:
+        shift_txt = f"{shift['shift']:+.2f} cm⁻¹"
+    else:
+        shift_txt = "未检出（0 cm⁻¹）"
 
-    def fmt(v):
-        return "—" if np.isnan(v) else f"{v:.4f}"
+    def mark(v):
+        return "✓" if v else "✗"
+
+    def fmt(v, nd=3):
+        return "—" if (v is None or np.isnan(v)) else f"{v:.{nd}f}"
 
     print(f"=== 谱图比对：{sm_path.name}  vs  {ref_path.name} ===")
     print(f"判定：{verdict}\n")
     print("【判据分解】")
-    print(f"  原始谱相关   r   = {r_all:.4f}  {mark(r_all >= thr_r)}（阈值 {thr_r:.2f}）")
-    print(f"  一阶导相关   r'  = {fmt(r_d1)}  {mark(deriv_ok)}（阈值 {thr_d:.2f}）"
-          + ("   ← 精细结构有差异" if deriv_poor else ""))
-    print(f"  二阶导相关   r'' = {fmt(r_d2)}")
-    print(f"  指纹区相关   r_f = {r_fp:.4f}")
-    print(f"  峰位最大偏差     = "
-          f"{'—' if np.isnan(max_dev) else f'{max_dev:.1f} cm⁻¹'}  "
-          f"{mark(peaks_ok)}（限值 ±5）")
-    print(f"  显著差异区       = {len(regions)} 处  {mark(not big_region)}")
+    print(f"  原始谱相关     r    = {r_all:.4f}   {mark(raw_ok)}（阈值 {thr_r:.2f}）")
+    print(f"  一阶导相关     r′   = {fmt(r_d1)}   {mark(passed(r_d1, thr_d))}"
+          f"（阈值 {thr_d:.2f}）")
+    if use_align:
+        print(f"  位移校正       Δν   = {shift['shift']:+.2f} cm⁻¹   "
+              f"→ r′ = {fmt(r_d1_al)}   {mark(aligned_ok)}")
+    elif shift["verdict"] == "unreliable":
+        print("  位移校正       Δν   = 未采用（搜索触界，偏移不可确认）")
+    else:
+        print("  位移校正       Δν   = 未检出系统性偏移")
+    print(f"  二阶导相关     r″   = {fmt(r_d2_al)}")
+    print(f"  指纹区相关     r_f  = {r_fp:.4f}")
+    print(f"  校正后峰位残差      = "
+          f"{'—' if np.isnan(resid) else f'{resid:.1f} cm⁻¹'}   {mark(resid_ok)}（限值 5）")
+    if use_align and not np.isnan(max_dev):
+        print(f"  校正前峰位偏差      = {max_dev:.1f} cm⁻¹")
+    print(f"  显著差异区          = {len(regions_al)} 处   {mark(not big_region_al)}")
     print("\n【诊断】")
     for line in diag:
         print(f"  · {line}")
     print(f"\n· 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个")
-    if regions:
+    if regions_al:
         print("· 主要差异区：")
-        for pos, val, w in regions:
+        for pos, val, w in regions_al:
             print(f"    {pos:.0f} cm⁻¹  {'样品更强' if val > 0 else '对照更强'} "
                   f"（ΔA {val:+.3f}）")
     else:
         print("· 未发现显著差异区")
+    print(f"\n【结论边界】\n  {BOUNDARY_TEXT[verdict]}")
 
     out = pathlib.Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1759,70 +2278,93 @@ def cmd_match(args):
     setup_cjk()
     fig, axes = plt.subplots(2, 1, figsize=(9, 6.2), dpi=200,
                              gridspec_kw={"height_ratios": [2, 1]}, sharex=True)
-    axes[0].plot(GRID, r, lw=0.9, color="#7f8c8d", label=f"对照 {ref_path.name}")
-    axes[0].plot(GRID, s, lw=0.9, color="#1f3a93", label=f"样品 {sm_path.name}")
+    ref_label = (f"对照 {ref_path.name}（已校正 {shift['shift']:+.1f} cm$^{{-1}}$）"
+                 if use_align else f"对照 {ref_path.name}")
+    axes[0].plot(grid, r_al, lw=0.9, color="#7f8c8d", label=ref_label)
+    axes[0].plot(grid, s, lw=0.9, color="#1f3a93", label=f"样品 {sm_path.name}")
     axes[0].legend(fontsize=7, frameon=False)
     axes[0].set_ylabel("吸光度")
-    axes[0].set_title(f"谱图比对（r={r_all:.4f}，判定：{verdict}）", fontsize=10)
-    axes[1].plot(GRID, d, lw=0.8, color="#c0392b")
+    axes[0].set_title(f"谱图比对（r′ = {fmt(r_d1_al)}，判定：{verdict}）", fontsize=10)
+    d_plot = s - r_al
+    axes[1].plot(grid, d_plot, lw=0.8, color="#c0392b")
     axes[1].axhline(0, color="#999999", lw=0.5, ls="--")
-    for pos, val, w in regions:
+    for pos, val, w in regions_al:
         axes[1].axvspan(pos - w, pos + w, color="#e67e22", alpha=0.15)
-    axes[1].set_ylabel("差值")
+    axes[1].set_ylabel("差值（校正后）")
     axes[1].set_xlabel("波数 (cm$^{-1}$)")
     axes[1].set_xlim(4000, 400)
     for a in axes:
         for sp in ("top", "right"):
             a.spines[sp].set_visible(False)
     fig.tight_layout()
+    stamp_figure(fig)
     fig.savefig(png)
     plt.close(fig)
 
-    md = _report(args.outdir, f"{sm_path.stem}_vs_{ref_path.stem}.md", [
+    md = _report(out, f"{sm_path.stem}_vs_{ref_path.stem}.md", [
         f"# 谱图比对：{sm_path.name} vs {ref_path.name}", "",
         f"**判定：{verdict}**", "",
+        f"> {BOUNDARY_TEXT[verdict]}", "",
         "## 判据", "",
         "| 判据 | 实测 | 阈值 | 结论 |",
         "|---|---|---|---|",
-        f"| 原始谱相关 | r = {r_all:.4f} | ≥ {thr_r:.2f} | {mark(r_all >= thr_r)} |",
-        f"| 一阶导相关 | r′ = {fmt(r_d1)} | ≥ {thr_d:.2f} | {mark(deriv_ok)} |",
-        f"| 二阶导相关 | r″ = {fmt(r_d2)} | 参考项 | — |",
-        f"| 指纹区相关 | r_f = {r_fp:.4f} | 参考项 | — |",
-        f"| 峰位最大偏差 | {'—' if np.isnan(max_dev) else f'{max_dev:.1f} cm⁻¹'} "
-        f"| ≤ 5 | {mark(peaks_ok)} |",
-        f"| 显著差异区 | {len(regions)} 处 | 无 ΔA > 0.12 | {mark(not big_region)} |",
+        f"| 原始谱相关 r | {r_all:.4f} | ≥ {thr_r:.2f} | {mark(raw_ok)} |",
+        f"| 一阶导相关 r′（校正前） | {fmt(r_d1)} | ≥ {thr_d:.2f} "
+        f"| {mark(passed(r_d1, thr_d))} |",
+        f"| 位移校正量 | {shift_txt} | — | — |",
+        f"| 一阶导相关 r′（校正后） | {fmt(r_d1_al)} | ≥ {thr_d:.2f} | {mark(aligned_ok)} |",
+        f"| 二阶导相关 r″ | {fmt(r_d2_al)} | 参考项 | — |",
+        f"| 指纹区相关 r_f | {r_fp:.4f} | 参考项 | — |",
+        f"| 校正后峰位残差 | {'—' if np.isnan(resid) else f'{resid:.1f} cm⁻¹'} "
+        f"| ≤ 5 | {mark(resid_ok)} |",
+        f"| 显著差异区 | {len(regions_al)} 处 | 无 ΔA > 0.12 | {mark(not big_region_al)} |",
         "", "## 诊断", "",
         *[f"- {line}" for line in diag],
         f"- 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个",
         "", "## 主要差异区", "",
         *([f"- {pos:.0f} cm⁻¹：{'样品更强' if v > 0 else '对照更强'}（ΔA {v:+.3f}）"
-           for pos, v, _ in regions] or ["- 未发现显著差异"]),
+           for pos, v, _ in regions_al] or ["- 未发现显著差异"]),
         "", "## 判据说明", "",
-        "- **原始谱相关**：两谱逐点线性相关，对整体形状敏感，但对基线漂移、散射与膜厚差异也敏感。",
-        "- **一阶导相关**：先求一阶导数再相关，抵消常数基线偏移，只比峰位与峰形；"
-        "这是谱库检索软件中「derivative correlation」的核心思想。",
-        "- **二阶导相关**：同时抵消偏移与斜率，但对噪声敏感，故列为参考项。",
-        "- 两条相关判据方向不一致时，判定降为「需复核」并给出诊断，不强行给结论。",
-        "", "> 阈值说明：相关系数 0.98 与 0.95 为常用经验值，正式检验应按中国药典 0402"
-        " 要求预设并经专属性验证；峰位偏差限值 ±5 cm⁻¹ 引自药典；"
-        "diff 判据 ΔA > 0.12 为本工具设定的显示阈值。",
+        "- **原始谱相关**：逐点线性相关，对整体形状敏感，也会被基线、散射与膜厚差异稀释。",
+        "- **一阶导相关**：求导后比较，抵消常数基线偏移，只保留峰位与峰形；"
+        "对应谱库检索软件中的 derivative correlation。",
+        f"- **位移校正**：在 ±{args.max_shift:.0f} cm⁻¹ 内搜索使一阶导相关最大的整体平移，"
+        "仅当增益 ≥ 0.03 且极值不触界时才采用；触界说明两谱差异过大，不做校正。",
+        "- **校正后峰位残差**：校正后仍存在的峰位错配，是独立于相关判据的验证。",
+        "", f"> 阈值说明：r 阈值 {thr_r:.2f}、r′ 阈值 {thr_d:.2f} 为经验值，"
+        "正式检验应按中国药典 0402 要求预设并经专属性验证；"
+        "峰位偏差限值 ±5 cm⁻¹ 引自药典。",
         "", f"![compare]({png.name})",
     ])
     print(f"\nsaved: {png}\nsaved: {md}")
     if getattr(args, "json", False):
         print(json.dumps({
+            "schema_version": SCHEMA_VERSION, "version": __version__,
             "ok": True, "sample": str(sm_path), "reference": str(ref_path),
             "verdict": verdict,
-            "metrics": {"r_full": round(r_all, 4), "r_fingerprint": round(r_fp, 4),
-                        "r_deriv1": None if np.isnan(r_d1) else round(r_d1, 4),
-                        "r_deriv2": None if np.isnan(r_d2) else round(r_d2, 4),
-                        "max_peak_deviation": None if np.isnan(max_dev) else round(max_dev, 1),
-                        "matched_peaks": len(deltas), "unmatched_peaks": len(unmatched_s)},
-            "criteria": {"base_pass": bool(base_pass), "deriv_pass": bool(deriv_ok),
+            "scenario": scenario,
+            "boundary": BOUNDARY_TEXT[verdict],
+            "metrics": {
+                "r_full": round(r_all, 4),
+                "r_fingerprint": round(r_fp, 4),
+                "r_deriv1": None if np.isnan(r_d1) else round(r_d1, 4),
+                "r_deriv2": None if np.isnan(r_d2) else round(r_d2, 4),
+                "shift_cm": round(shift["shift"], 2),
+                "shift_gain": round(shift["gain"], 4),
+                "shift_verdict": shift["verdict"],
+                "aligned": bool(use_align),
+                "r_deriv1_aligned": None if np.isnan(r_d1_al) else round(r_d1_al, 4),
+                "r_deriv2_aligned": None if np.isnan(r_d2_al) else round(r_d2_al, 4),
+                "residual_max_cm": None if np.isnan(resid) else round(resid, 2),
+                "max_peak_deviation": None if np.isnan(max_dev) else round(max_dev, 2),
+                "matched_peaks": len(deltas), "unmatched_peaks": len(unmatched_s),
+            },
+            "criteria": {"base_pass": bool(raw_ok), "deriv_pass": bool(aligned_ok),
                          "r_threshold": thr_r, "deriv_threshold": thr_d},
             "diagnosis": diag,
-            "differences": [{"pos": round(pos, 0), "who": "sample" if v > 0 else "reference",
-                             "delta_absorbance": round(v, 3)} for pos, v, _ in regions],
+            "differences": [{"pos": round(pos, 0),
+                             "who": "sample" if v > 0 else "reference",
+                             "delta_absorbance": round(v, 3)} for pos, v, _ in regions_al],
             "report": str(md), "figure": str(png),
         }, ensure_ascii=False, indent=2))
 
@@ -1830,6 +2372,8 @@ def cmd_match(args):
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="ftir", description="Standalone FT-IR analysis toolkit")
+    ap.add_argument("-V", "--version", action="version",
+                    version=f"ftir-toolkit {__version__} (schema {SCHEMA_VERSION})")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p, multi=False):
@@ -1857,6 +2401,8 @@ def build_parser():
 
     p3 = sub.add_parser("detail", help="metrics, 2nd derivative, area ratios")
     common(p3, multi=True)
+    p3.add_argument("--sensitivity", action=argparse.BooleanOptionalAction, default=True,
+                    help="报告各指标跨参数范围（默认开启）")
     p3.set_defaults(func=cmd_detail)
 
     p4 = sub.add_parser("series", help="detail + trend vs ionic radius")
@@ -1883,6 +2429,8 @@ def build_parser():
     p7.add_argument("--peaks", type=int, default=10)
     p7.add_argument("--lookup", action=argparse.BooleanOptionalAction, default=True,
                     help="检索公开文献线索（默认开启；离线可用 --no-lookup 关闭）")
+    p7.add_argument("--sensitivity", action=argparse.BooleanOptionalAction, default=True,
+                    help="在三组参数下重算以评估峰稳定性（默认开启）")
     p7.set_defaults(func=cmd_read)
 
     p8 = sub.add_parser("match", help="与对照谱比对，给出判定")
@@ -1894,12 +2442,17 @@ def build_parser():
                     help="原始谱相关系数阈值（默认 0.98）")
     p8.add_argument("--deriv-threshold", type=float, default=0.95,
                     help="一阶导相关系数阈值（默认 0.95）")
+    p8.add_argument("--max-shift", type=float, default=15.0,
+                    help="位移搜索半径，cm⁻¹（默认 15；超过视为不可靠）")
+    p8.add_argument("--no-align", action="store_true",
+                    help="不做位移校正，只用原始位置比对")
     p8.add_argument("--json", action="store_true", help="同时输出机器可读 JSON")
     p8.set_defaults(func=cmd_match)
     return ap
 
 
 def main():
+    global _ACTIVE_PARAMS
     args = build_parser().parse_args()
     targets = []
     for attr in ("files", "file", "sample", "reference"):
@@ -1908,9 +2461,17 @@ def main():
             targets.extend(v)
         elif v:
             targets.append(v)
+    seen = set()
     for f in targets:
         if not pathlib.Path(f).exists():
             sys.exit(f"file not found: {f}")
+        key = str(pathlib.Path(f).resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        for msg in inspect_input(pathlib.Path(f)):
+            print(f"[输入检查] {pathlib.Path(f).name}: {msg}", file=sys.stderr)
+    _ACTIVE_PARAMS = param_summary(args)
     if getattr(args, "subtract", None) and not pathlib.Path(args.subtract).exists():
         sys.exit(f"reference not found: {args.subtract}")
     args.func(args)

@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.5.0] - 2026-11-24
+
+### Changed — comparison rebuilt around a shift estimate
+
+`match` no longer packs four numbers into a verdict. It now:
+
+1. estimates a global wavenumber shift by grid search on the derivative spectra
+   (0.25 cm⁻¹ steps, ±15 cm⁻¹), adopted only when the gain is ≥ 0.03 and the
+   optimum is interior;
+2. recomputes every metric before and after correction, excluding envelopes wider
+   than 100 cm⁻¹ from position criteria;
+3. classifies the outcome into one of five scenarios (systematic shift,
+   compositional difference, baseline/preparation difference, consistent,
+   ambiguous) and prints the matching advice.
+
+A detected shift ≥ 1 cm⁻¹ now yields "review" even when the corrected metrics
+pass: two spectra on different wavenumber scales is a finding in itself.
+
+Every verdict carries a fixed boundary sentence — "consistent" now always states
+that no significant difference was found, **not** that identity is confirmed.
+
+### Added
+
+- **Parameter sensitivity** in `read` and `detail`: three parameter sets
+  (smoothing 7/9/11 × baseline λ 1e5/1e6) recomputed and compared. Peaks are
+  classified as stable / stable-outside-range / partial / position-sensitive /
+  likely-spurious; `detail` reports the span and relative spread per metric.
+  Measured on real spectra, O-H FWHM spans 18% while Δν spans 0% — the former is
+  not quotable digit by digit, the latter is.
+- **Synthetic regression suite** `ftir-tool/tests/test_synthetic.py`: 18 tests,
+  about 20 s, asserting conclusions rather than digits.
+- **Input checks** before any processing: non-finite rows, duplicate abscissae,
+  uneven spacing, coarse spacing, incomplete wavenumber coverage, constant signal.
+- **Unit handling**: `FTIR_Y_UNITS=T|Abs` overrides the guess; ambiguous
+  magnitudes (2.5 < ymax ≤ 20 with no header) now produce a warning instead of a
+  silent assumption.
+- `--version`, `schema_version` in every JSON payload, and a version/parameter
+  stamp in every Markdown report and PNG figure.
+
+### Fixed
+
+- **Absorbance files were clipped as if they were %T.** `np.clip(y, 0.5, None)`
+  ran on both branches, so an absorbance spectrum with a 0.02 baseline had every
+  point raised to 0.5 and the whole curve destroyed. Only transmittance is clipped
+  now. Found by the new test suite.
+- **Broad envelopes corrupted the peak-position criterion.** A 3400 cm⁻¹ band
+  450 cm⁻¹ wide had its apex moved 9 cm⁻¹ by a sloping baseline, which was read
+  as a peak shift. Envelopes beyond 100 cm⁻¹ FWHM are now excluded from matching.
+- **Grid orientation assumption.** Asymmetry side labels and the shoulder search
+  assumed a descending grid; the actual grid ascends, so the search went to the
+  wrong side of the band. Both now select by wavenumber, not array index.
+- **`fig.tight_layout` glyph warning**: `cm⁻¹` in a legend lacked a glyph in the
+  CJK font; switched to mathtext.
+
 ## [0.4.0] - 2026-11-24
 
 ### Added — three analysis capabilities

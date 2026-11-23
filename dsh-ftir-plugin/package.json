@@ -1,6 +1,6 @@
 {
   "name": "dsh-ftir",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "FT-IR spectrum QC, interpretation and comparison tools for DeepSeek Harness",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

@@ -68,7 +68,7 @@ python ftir.py read sample.txt --peaks 15      # more peaks
 python ftir.py read sample.txt --no-lookup     # skip the online search
 ```
 
-Six sections: peak table (with asymmetry, shoulder flag, confidence and competing assignments), conclusion, assignments needing review, orthogonal validation, reference databases, standing caveats.
+Seven sections: peak table (asymmetry, shoulder flag, confidence, competing assignments), conclusion, assignments needing review, parameter sensitivity, orthogonal validation, reference databases, standing caveats.
 
 **Four numeric columns in the peak table**
 
@@ -84,6 +84,7 @@ Six sections: peak table (with asymmetry, shoulder flag, confidence and competin
 - Group-level assignments follow a two-evidence rule; a single band yields "suggested" only
 - Group-level assignments follow a two-evidence rule; a single band yields "suggested" only
 - The online search is a lead generator: only titles mentioning both infrared and assignment/interpretation are kept, and timeouts are reported rather than hidden
+- **Parameter sensitivity**: the file is recomputed under three parameter sets (smoothing 7/9/11, baseline λ 1e5/1e6), marking stable, partial, likely-spurious and out-of-range peaks; disable with `--no-sensitivity`
 
 Output: `<name>_read.md`, `<name>_read.png` (annotation colour encodes confidence).
 
@@ -91,35 +92,49 @@ Output: `<name>_read.md`, `<name>_read.png` (annotation colour encodes confidenc
 
 ```bash
 python ftir.py match sample.txt reference.txt
-python ftir.py match sample.txt reference.txt --threshold 0.99
-python ftir.py match sample.txt reference.txt --deriv-threshold 0.97
+python ftir.py match sample.txt reference.txt --threshold 0.99          # raw threshold
+python ftir.py match sample.txt reference.txt --deriv-threshold 0.97    # derivative threshold
+python ftir.py match sample.txt reference.txt --no-align                # disable shift correction
+python ftir.py match sample.txt reference.txt --max-shift 8             # narrower search
 ```
 
-Four criteria, each printed as pass or fail:
+**Flow**
 
-| Criterion | Default | What it tests |
+1. **Estimate a global shift** by grid search on the first-derivative spectra over ±15 cm⁻¹ (0.25 cm⁻¹ steps). Adopted only when the gain is ≥ 0.03 and the optimum is interior; hitting the boundary means the spectra are too different to align.
+2. **Recompute metrics** before and after correction. Position criteria exclude envelopes wider than 100 cm⁻¹, whose apex follows the baseline rather than the chemistry.
+3. **Verdict by scenario:**
+
+| Scenario | Signature | Verdict | Advice |
+|---|---|---|---|
+| Systematic offset | r′ recovers, residual shrinks | review | verify wavenumber accuracy, re-measure |
+| Different composition | r′ stays low, bands concentrated | inconsistent | check components, coordination, polymorph |
+| Baseline/preparation | derivative consistent, raw low | consistent or review | subtract blank, renormalise, repeat |
+| Borderline/contradictory | criteria disagree | review | check preparation, calibration, S/N |
+
+**Criteria and thresholds**
+
+| Criterion | Default | Tests |
 |---|---|---|
-| Raw correlation r | ≥ 0.98 | overall shape agreement |
-| First-derivative correlation r′ | ≥ 0.95 | band positions and shapes with baseline and scatter removed |
-| Maximum peak deviation | ≤ 5 cm⁻¹ | systematic shift of band positions |
-| Strong difference band | none with \|ΔA\| > 0.12 | local compositional or structural change |
+| Raw correlation r | ≥ 0.98 | overall shape |
+| Derivative correlation r′ (aligned) | ≥ 0.95 | positions and shapes |
+| Residual after correction | ≤ 5 cm⁻¹ | peak misalignment |
+| Strong difference band | none with \|ΔA\| > 0.12 | local change |
 
-| Combination | Verdict |
-|---|---|
-| r, r′, deviation and difference bands all pass | consistent |
-| any of the above fails, or r ≥ 0.95 with deviation ≤ 10 cm⁻¹ | review |
-| otherwise | inconsistent |
+"Consistent" needs all four to pass **and** no detected shift ≥ 1 cm⁻¹. A detected shift alone yields "review": two spectra on different wavenumber scales is a finding in itself, even when the corrected metrics pass.
 
-When the two correlation criteria disagree the tool does not force a verdict; it prints a diagnosis. The two common cases:
+**Every verdict carries a fixed boundary statement:**
 
 ```
-raw similar, derivative different → systematic band shift or width change, not a compositional difference
-derivative consistent, raw low     → baseline, scatter or thickness difference; re-measure after blank subtraction
+consistent   → no significant difference under this method and these thresholds;
+               this is not a confirmation of chemical identity.
+review       → criteria did not pass coherently, or a difference was located but
+               not resolved; do not use this to claim identity.
+inconsistent → at least one core criterion clearly fails.
 ```
 
-**Why derivative correlation matters.** The raw coefficient is diluted by baseline drift, scatter and pellet thickness — the same material prepared differently can fall from 0.999 to 0.95 — while two homologues can reach 0.99 on a shared broad envelope. Differentiation keeps band positions and shapes, which is the idea behind "derivative correlation" in library-search software (see [S20](../REFERENCES.en.md)).
+**Why shift correction**: two instruments at different calibration states offset the spectra by a few cm⁻¹; raw and derivative correlation both drop while the material is identical. Without separating this term, instrument drift reads as a different substance. The converse also happens — two homologues reach r = 0.99 on a shared envelope, and only the derivatives show the difference (library software calls this derivative correlation, see [S20](../REFERENCES.en.md)).
 
-Output: `<sample>_vs_<reference>.md` (criteria table plus diagnosis) and `.png` (overlay plus difference spectrum with highlighted bands).
+Output: `<sample>_vs_<reference>.md` (criteria table, diagnosis, boundary) and `.png` (overlay plus aligned difference spectrum).
 
 ### Research commands
 
@@ -171,6 +186,22 @@ A fitted FWHM above 60 cm⁻¹ usually means two bands were merged — supply `-
 - File names are prefixed with the input stem (extension removed); multi-spectrum commands use fixed names
 - Markdown is UTF-8 and uses standard tables, ready to paste into a report
 - Figures are 200 dpi PNG, wavenumber axis reversed, with a registered CJK font (DengXian, Microsoft YaHei, SimHei in that order)
+
+## Verification
+
+```
+python tests/test_synthetic.py
+```
+
+18 synthetic-spectrum regression tests, about 20 seconds. The answers are known by construction, so a change can be judged without reference standards.
+
+| Group | Coverage |
+|---|---|
+| Primitives | %T/absorbance round-trip, row-order independence, parabolic apex accuracy, asymmetry ≈ 1 for a symmetric band, derivative correlation immune to offsets |
+| Shift estimation | ±3 / ±5 / ±8 cm⁻¹ recovered; ±1 cm⁻¹ left alone; unrelated spectra reported unreliable |
+| Verdict stability | consistent after noise, baseline, scaling and format changes; 3 cm⁻¹ reads review; unrelated spectra read inconsistent |
+
+Tests assert conclusions, not last digits. Three known limits are encoded too: a 35% shoulder is undetectable, envelope apexes are excluded, and one weak shared band does not validate identity.
 
 ## Method parameters
 

@@ -11,8 +11,8 @@ Decision rules, the confidence model and the underlying references are documente
 | Tool | Input | Returns |
 |---|---|---|
 | `ftir_check` | `file` | `verdict` (ok / caution / unusable), `metrics` (S/N, saturation, moisture, CO₂, baseline), `problems`, `notes`, report and figure paths |
-| `ftir_read` | `file`, optional `peaks`, optional `lookup` | `peaks[]` with `pos`, `subpixel`, `asymmetry`, `shoulder`, `confidence` and `alternatives`; `conclusion`, `supported`, `caveats`, `orthogonal`, `databases`, `reading`, `literature`, `risk`, report and figure paths |
-| `ftir_match` | `sample`, `reference`, optional `threshold`, optional `deriv_threshold` | `verdict`, `metrics` (raw / first-derivative / second-derivative / fingerprint correlation, max peak deviation, matched and unmatched counts), `criteria` (`base_pass`, `deriv_pass`), `diagnosis[]`, `differences[]`, report and figure paths |
+| `ftir_read` | `file`, optional `peaks`, optional `lookup` | `peaks[]` with `pos`, `subpixel`, `asymmetry`, `shoulder`, `confidence`, `alternatives`; `conclusion`, `supported`, `caveats`, `sensitivity[]`, `orthogonal`, `databases`, `reading`, `literature`, `risk`, report and figure paths |
+| `ftir_match` | `sample`, `reference`, optional `threshold`, `deriv_threshold`, `max_shift` | `verdict`, `scenario`, `boundary` (the verbatim boundary sentence), `metrics` (including `shift_cm`, `shift_gain`, `shift_verdict`, `aligned`, `r_deriv1_aligned`, `residual_max_cm`), `criteria`, `diagnosis[]`, `differences[]`, report and figure paths |
 | `ftir_doctor` | — | Python version, interpreter path, `numpy` / `scipy` / `matplotlib` versions |
 
 Every tool writes a Markdown report and a PNG figure into the output directory and returns their paths, so the agent can read or display them directly.
@@ -23,6 +23,10 @@ Every tool writes a Markdown report and a PNG figure into the output directory a
 - `criteria.deriv_pass` — whether the first-derivative correlation meets its threshold; when it disagrees with `base_pass`, `diagnosis` states whether the cause is a systematic band shift or a baseline/thickness difference
 - `peaks[].shoulder` — `true` means an unresolved component really exists on the wider side (ratio ≥ 1.30 **and** a second-derivative maximum)
 - `peaks[].asymmetry` — `null` means the band is too narrow or too broad for the ratio to be meaningful; do not quote it
+- `sensitivity[]` — `verdict` is one of stable / stable-outside-range / partial / position-sensitive / likely-spurious; only the first two belong in a conclusion
+- `scenario` — `systematic_shift` / `compositional` / `baseline_or_prep` / `consistent` / `ambiguous`, which decides what to advise the user to do next
+- `boundary` — the verbatim boundary sentence; keep it as-is rather than paraphrasing it into a stronger claim
+- every JSON payload carries `schema_version` and `version` for upstream compatibility checks
 
 ## Requirements
 

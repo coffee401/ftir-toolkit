@@ -31,7 +31,7 @@ The toolkit does not assign compound identity, does not quantify, and does not d
 |---|---|---|---|
 | Quality control | Is this spectrum usable? | `check` | ok / caution / unusable, with per-criterion evidence |
 | Assignment | Which functional groups? | `read` | peak table with sub-pixel positions, asymmetry, confidence and competing assignments, conclusion, orthogonal-validation advice |
-| Comparison | Does it match the reference? | `match` | consistent / review / inconsistent, with a per-criterion breakdown and a diagnosis |
+| Comparison | Does it match the reference? | `match` | consistent / review / inconsistent, with a global shift estimate, a per-criterion breakdown and a scenario diagnosis |
 | Research | Series trends, overlapped bands | `single` `compare` `detail` `series` `deconv` | metric tables, trends, component shares |
 
 Input is two-column text (`.txt` / `.csv` / `.tsv`) or instrument exports with `##` headers. `%T` and absorbance are detected automatically; transmittance is converted to absorbance.
@@ -107,7 +107,7 @@ Each run also writes `*_read.md` (a paste-ready report) and `*_read.png` (annota
 |---|---|---|
 | `check` | spectrum health check | `--smooth` |
 | `read` | assignment hypotheses + validation advice | `--peaks` `--lookup/--no-lookup` |
-| `match` | compare against a reference (raw and derivative criteria) | `--threshold` (0.98) `--deriv-threshold` (0.95) |
+| `match` | compare against a reference (shift correction + raw/derivative criteria) | `--threshold` (0.98) `--deriv-threshold` (0.95) `--max-shift` (15) `--no-align` |
 | `single` | peak table + annotated figure | `--peaks` `--prominence` |
 | `compare` | band positions across samples | `--labels` |
 | `detail` | O-H centre/FWHM, C=O by 2nd derivative, COO⁻ splitting, area ratios | `--labels` |
@@ -163,23 +163,62 @@ Two evidences yield "supported", one yields "suggested (needs review)", and a sp
 
 ### Spectrum comparison
 
-Four criteria decide the verdict; failing any one of them downgrades it:
+Comparison runs in three steps: locate the source of the difference first, then
+apply criteria — instead of packing several numbers into one verdict.
 
-| Criterion | Threshold | What it tests |
+**Step 1 — global shift.** A grid search on the first-derivative spectra over
+±15 cm⁻¹ (0.25 cm⁻¹ steps) finds the translation that maximises correlation. It
+is adopted only when the gain is ≥ 0.03 and the optimum is interior; hitting the
+search boundary means the spectra are too different to align, so no correction
+is applied.
+
+**Step 2 — separate metrics.** Raw correlation r, derivative correlation before
+(r′) and after (r′ₐ) correction, second-derivative correlation r″, peak deviation
+and residual before/after, and difference bands. Position criteria exclude
+envelopes wider than 100 cm⁻¹, whose apex is set by the baseline rather than by
+chemistry.
+
+**Step 3 — verdict by scenario.**
+
+| Scenario | Signature | Outcome |
 |---|---|---|
-| Raw correlation r | ≥ 0.98 | overall shape agreement |
-| First-derivative correlation r′ | ≥ 0.95 | band positions and shapes, with baseline and scatter removed |
-| Maximum peak deviation | ≤ 5 cm⁻¹ | systematic shift of band positions [S4] |
-| Strong difference band | none with \|ΔA\| > 0.12 | local compositional or structural change |
+| Systematic wavenumber offset | r′ recovers after correction, residual shrinks | "review"; calibrate and re-measure |
+| Different composition/structure | r′ stays low, difference bands concentrated | "inconsistent" |
+| Baseline or preparation difference | derivative consistent, raw low | "consistent" or "review"; subtract blank and repeat |
+| Borderline or contradictory | criteria disagree | "review"; no forced verdict |
 
-**Why derivative correlation.** The raw coefficient is sensitive to overall shape but also to baseline drift, scatter and pellet thickness: the same material prepared differently can drop to r = 0.95, while two homologues sharing a broad envelope can reach 0.99. Differentiation removes phase information and leaves band positions and shapes, which is why library-search software distinguishes "correlation" from "derivative correlation" [S20].
+**Why shift correction.** Two instruments at different calibration states offset
+a spectrum by a few cm⁻¹; raw and derivative correlation both drop while the
+material is unchanged. Without separating this term, instrument drift is read as
+a different substance. Conversely two homologues can reach r = 0.99 on a shared
+envelope, and only the derivatives reveal the difference [S20].
 
-**No forced verdict when criteria disagree.** If the two correlation criteria point in opposite directions, the verdict is downgraded to "review" and a diagnosis is printed, for example:
+**Every verdict carries its boundary.** Even "consistent" prints: *no significant
+difference was found under this method and these thresholds; this is not a
+confirmation of chemical identity.* "Review" and "inconsistent" each carry their
+own statement, so the reader is not left to interpret.
 
-- raw similar, derivative different → systematic band shift or width change, not a compositional difference
-- derivative consistent, raw low → baseline, scatter or thickness difference; re-measure after blank subtraction
+Measured on real spectra: a 3 cm⁻¹ offset leaves raw r = 0.992 (still passing),
+but r′ = 0.927 and a detected −3.00 cm⁻¹ shift downgrade it to "review";
+homologues give r = 0.996, r′ = 0.995, residual 1.9 cm⁻¹ → "consistent"; different
+compounds give r = 0.893, r′ = 0.579 → "inconsistent". The 0.98 / 0.95 thresholds
+are empirical; formal identification must preset and validate its own [S4].
 
-Measured: shifting a spectrum by 3 cm⁻¹ and comparing it with the original gives raw r = 0.992 (the old rule would have said "consistent"), while r′ = 0.927 downgrades it to "review"; the sub-pixel peak deviation reads 3.1 cm⁻¹. The 0.98 / 0.95 thresholds are empirical; formal identification must preset and validate its own thresholds [S4].
+### Parameter sensitivity
+
+A single run's FWHM or area ratio is partly decided by the smoothing window and
+baseline strength rather than by the sample. `read` and `detail` therefore
+recompute under three parameter sets by default (smoothing 7 / 9 / 11, baseline
+λ 1×10⁵ / 1×10⁶):
+
+- a peak within 1.5 cm⁻¹ and present in all three runs is marked "stable"
+- a peak appearing in only some runs is marked "partial" or "likely spurious"
+- peaks outside all known ranges are labelled "outside ranges" and kept separate
+- `detail` reports the **span and relative spread** per metric, e.g. O-H FWHM
+  main value 28.5, range 28.2–33.3 (±18%), while Δν spans 0% and can be quoted
+
+Metrics with more than 10% spread should not be quoted digit by digit, only used
+for trends. `--no-sensitivity` disables the check (about 3× faster).
 
 ## Method parameters
 
@@ -195,6 +234,8 @@ Measured: shifting a spectrum by 3 cm⁻¹ and comparing it with the original gi
 | Shoulder test | ratio ≥ 1.30 and a second-derivative maximum on that side | search radius 45 cm⁻¹, prominence ≥ 4% of that side's maximum |
 | Second derivative | negated SG second derivative | 15 points, order 3, Δ = 2 cm⁻¹ |
 | Derivative correlation | Pearson on SG first/second derivative | 15 points, order 3; second derivative is noise-sensitive and reported for reference only |
+| Shift estimation | grid search on derivatives + parabolic refinement | ±15 cm⁻¹, 0.25 cm⁻¹ steps; adopted when gain ≥ 0.03 and interior |
+| Parameter sensitivity | recompute under three parameter sets | smoothing 7 / 9 / 11, baseline λ 1×10⁵ / 1×10⁶; position tolerance 1.5 cm⁻¹ |
 | Deconvolution | pseudo-Voigt (shared η), bounded least squares | centres ±25 cm⁻¹, FWHM 4–120 cm⁻¹, height ≥ 0 |
 | Reference subtraction | raw absorbance subtraction, then re-baseline | `auto` scales by least squares over reference bands |
 | Similarity | Pearson correlation | computed for full range and ≤1500 cm⁻¹ |
@@ -223,6 +264,34 @@ All 20 references (ASTM E1252, ASTM E2310, Ph. Eur. 2.2.24, USP <854>, NIST WebB
 - **No library search** — public APIs cannot match spectra by similarity; the tool provides keyword leads only (see [REFERENCES.en.md](REFERENCES.en.md)).
 - **Mixtures** — single-component reliability drops sharply with overlapping components.
 - **No numerical ATR correction** — warnings only; no Kramers–Kronig or dispersion correction.
+
+## Verification
+
+`ftir-tool/tests/test_synthetic.py` holds 18 regression tests on synthetic
+spectra with known answers; the suite runs in about 20 seconds:
+
+```
+cd ftir-tool && python tests/test_synthetic.py
+```
+
+Three groups:
+
+1. **Primitives** — %T/absorbance round-trip, row-order independence, parabolic
+   apex accuracy, asymmetry ≈ 1 for a symmetric band, derivative correlation
+   immune to a constant offset
+2. **Shift estimation** — known ±3 / ±5 / ±8 cm⁻¹ recovered; ±1 cm⁻¹ left alone;
+   unrelated spectra reported as unreliable rather than forced into alignment
+3. **Verdict stability** — the same material still reads "consistent" after
+   added noise, a sloping baseline, an intensity change and a format change;
+   3 cm⁻¹ reads "review"; unrelated spectra read "inconsistent"
+
+Tests assert conclusions, not last digits. Three known limits are also encoded as
+tests: a 35% shoulder is undetectable, envelope apexes are excluded, and one weak
+shared band does not validate identity.
+
+The suite caught two real defects during development: absorbance files being
+clipped as if they were %T (a 0.02 baseline raised to 0.5), and an envelope apex
+drift misread as a 9 cm⁻¹ peak shift.
 
 ## Versioning
 
