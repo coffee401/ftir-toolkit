@@ -1,0 +1,37 @@
+{
+  "name": "dsh-ftir",
+  "version": "0.1.0",
+  "description": "FT-IR spectrum QC, interpretation and comparison tools for DeepSeek Harness",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "ftir",
+    "infrared",
+    "spectroscopy",
+    "chemistry"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json"
+  },
+  "dsh": {
+    "bundle": "./cordis.patch.yml"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

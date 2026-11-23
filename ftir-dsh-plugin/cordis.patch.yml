@@ -1,0 +1,4 @@
+# bundle patch: 把一个 dsh-ftir 挂到 profile 上
+- insert:
+    - id: ftir
+      name: 'dsh-ftir'

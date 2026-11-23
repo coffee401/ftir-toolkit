@@ -1,0 +1,1355 @@
+#!/usr/bin/env python
+"""ftir-tool — standalone FT-IR analysis (no external benchmark dependency).
+
+Subcommands
+    single   one spectrum  -> peak table + annotated figure
+    compare  N spectra     -> band positions, similarity matrix, overlay
+    detail   N spectra     -> O-H metrics, COO- splitting, area ratios, 2nd derivative
+    series   N spectra     -> detail metrics + trend vs ionic radius
+
+Input: two-column text (.txt/.csv/.tsv) with optional ##-header, %T or absorbance.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import pathlib
+import re
+import sys
+
+import numpy as np
+from scipy import sparse
+from scipy.signal import find_peaks, peak_widths, savgol_filter
+from scipy.stats import spearmanr
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+GRID = np.arange(400.0, 4001.0, 2.0)
+
+# ---------------------------------------------------------------- assignments
+BANDS = [
+    (3600, 3100, "O-H / N-H stretch"),
+    (3100, 3000, "aromatic C-H stretch"),
+    (3000, 2840, "aliphatic C-H stretch"),
+    (1760, 1735, "ester C=O"),
+    (1735, 1690, "carboxylic acid C=O"),
+    (1690, 1630, "amide C=O"),
+    (1630, 1560, "aromatic C=C / conjugated C=O"),
+    (1560, 1530, "COO- asymmetric"),
+    (1530, 1495, "N-H bend / aromatic"),
+    (1495, 1430, "aromatic C=C / CH2 bend"),
+    (1430, 1370, "COO- symmetric / CH3"),
+    (1370, 1290, "C-N / C-O stretch"),
+    (1290, 1180, "C-F stretch"),
+    (1180, 1000, "C-O-C / C-O stretch"),
+    (1000, 900, "skeletal vibration"),
+    (900, 700, "aromatic C-H out-of-plane"),
+    (700, 500, "C-Cl / skeletal bend"),
+]
+
+# nominal band centres for cross-sample tracking: (label, centre, tolerance)
+KEY_BANDS = [
+    ("O-H/N-H", 3365, 130),
+    ("aromatic C-H", 3057, 30),
+    ("aliphatic C-H", 2925, 50),
+    ("amide C=O", 1655, 30),
+    ("aromatic C=C", 1585, 25),
+    ("COO- asym", 1540, 20),
+    ("N-H bend", 1512, 18),
+    ("aromatic bend", 1435, 20),
+    ("COO- sym", 1428, 16),
+    ("C-N/C-O", 1315, 20),
+    ("C-F", 1218, 16),
+    ("C-O-C", 1108, 16),
+    ("para-subst. Ph", 844, 14),
+    ("mono-subst. Ph", 745, 20),
+]
+
+# bands integrated for semi-quantification: (label, centre, tolerance, half-width)
+AREA_BANDS = [
+    ("O-H", 3390, 130, 130),
+    ("amide C=O", 1655, 25, 14),
+    ("COO- asym", 1540, 22, 12),
+    ("COO- sym", 1428, 14, 12),
+    ("C-F", 1220, 16, 14),
+    ("Ph 844", 844, 12, 12),
+]
+
+COLORS = ["#1f3a93", "#c0392b", "#27ae60", "#e67e22", "#8e44ad", "#16a085", "#d35400"]
+
+
+# ---------------------------------------------------------------- io
+def load_spectrum(path: pathlib.Path):
+    """Return (x, y, is_percent_T)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    header = "\n".join(l for l in text.splitlines()[:30] if l.startswith("#"))
+    is_pct = "%t" in header.lower() or "transmittance" in header.lower()
+
+    xs, ys = [], []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith(("#", "//", ";", '"')):
+            continue
+        nums = []
+        for tok in re.split(r"[\s,;\t]+", s):
+            try:
+                nums.append(float(tok))
+            except ValueError:
+                pass
+        if len(nums) >= 2:
+            xs.append(nums[0])
+            ys.append(nums[1])
+    if len(xs) < 20:
+        sys.exit(f"{path.name}: only {len(xs)} data rows parsed - is it two columns (x, y)?")
+    x = np.asarray(xs, dtype=float)
+    y = np.asarray(ys, dtype=float)
+    order = np.argsort(x)
+    x, y = x[order], y[order]
+    if not is_pct and y.max() > 5:  # no header but values look like %T
+        is_pct = True
+    return x, y, is_pct
+
+
+# ---------------------------------------------------------------- preprocess
+def als_baseline(y, lam=1e5, p=0.001, niter=12):
+    n = len(y)
+    D = sparse.diags([1, -2, 1], [0, -1, -2], shape=(n, n - 2), dtype=float)
+    w = np.ones(n)
+    z = y.copy()
+    for _ in range(niter):
+        W = sparse.spdiags(w, 0, n, n)
+        Z = (W + lam * D.dot(D.T)).tocsc()
+        z = sparse.linalg.spsolve(Z, w * y)
+        w = p * (y > z) + (1 - p) * (y < z)
+    return z
+
+
+def absorbance_on_grid(path: pathlib.Path, grid=GRID):
+    """Raw absorbance (no baseline, no smoothing) resampled onto `grid`."""
+    x, y, is_pct = load_spectrum(path)
+    y = np.clip(y, 0.5, None)
+    a = -np.log10(y / 100.0) if is_pct else y
+    return np.interp(grid, x, a)
+
+
+def finalize(a, smooth=9):
+    """Baseline-correct (ALS) and smooth an absorbance array."""
+    corr = a - als_baseline(a)
+    if smooth and smooth >= 5:
+        smooth = smooth if smooth % 2 else smooth + 1
+        corr = savgol_filter(corr, smooth, 3)
+    return corr
+
+
+def preprocess(path: pathlib.Path, grid=GRID, smooth=9):
+    """Baseline-corrected, smoothed absorbance resampled onto `grid`."""
+    return finalize(absorbance_on_grid(path, grid), smooth)
+
+
+def auto_sub_factor(sample, ref):
+    """Least-squares scale for reference subtraction (cancel the reference bands)."""
+    if ref is None or np.max(ref) <= 0:
+        return 0.0
+    m = ref > 0.2 * np.max(ref)
+    denom = float(np.sum(ref[m] ** 2))
+    if denom <= 0:
+        return 0.0
+    f = float(np.sum(sample[m] * ref[m]) / denom)
+    return max(f, 0.0)
+
+
+def normalize(spec):
+    m = np.max(np.abs(spec))
+    return spec / m if m else spec
+
+
+# ---------------------------------------------------------------- analysis
+def second_derivative(spec, grid=GRID):
+    return -savgol_filter(spec, 15, 3, deriv=2, delta=float(grid[1] - grid[0]))
+
+
+def detect_maxima(spec, grid=GRID, prominence=0.015):
+    idx, _ = find_peaks(spec, prominence=prominence, distance=3)
+    return grid[idx], spec[idx]
+
+
+def nearest_max(spec, center, tol, grid=GRID, maxima=None):
+    """Local maximum closest to `center` inside +-tol.
+
+    Peaks are detected *within the window* so shoulder bands are not missed.
+    """
+    win = (grid >= center - tol) & (grid <= center + tol)
+    if not win.any():
+        return float("nan"), 0.0
+    seg = spec[win]
+    if seg.max() <= 0:
+        return float("nan"), 0.0
+    idx, _ = find_peaks(seg, prominence=max(seg.max() * 0.05, 1e-6))
+    if len(idx):
+        cand = grid[win][idx]
+        i = int(np.argmin(np.abs(cand - center)))
+        return float(cand[i]), float(seg[idx[i]])
+    # no distinct local maximum: fall back to the window maximum
+    i = int(np.argmax(seg))
+    return float(grid[win][i]), float(seg[i])
+
+
+def band_area(spec, center, tol, hw, grid=GRID):
+    """Integrate +-hw around the real band maximum nearest `center`."""
+    pos, _ = nearest_max(spec, center, tol, grid)
+    if np.isnan(pos):
+        pos = float(center)
+    m = (grid >= pos - hw) & (grid <= pos + hw)
+    if m.sum() < 3:
+        return 0.0, pos
+    x, y = grid[m], spec[m]
+    y = y - np.linspace(y[0], y[-1], len(y))
+    return float(np.trapezoid(np.clip(y, 0, None), x)), pos
+
+
+def oh_metrics(spec, grid=GRID, lo=3100, hi=3700):
+    m = (grid >= lo) & (grid <= hi)
+    if not m.any():
+        return float("nan"), float("nan")
+    seg = spec[m].copy()
+    seg -= seg.min()
+    if seg.max() <= 0:
+        return float("nan"), float("nan")
+    x = grid[m]
+    cog = float(np.sum(x * seg) / np.sum(seg))
+    idx, _ = find_peaks(seg, prominence=seg.max() * 0.1)
+    if len(idx) == 0:
+        return cog, float("nan")
+    widths = peak_widths(seg, [idx[int(np.argmax(seg[idx]))]], rel_height=0.5)[0]
+    return cog, float(widths[0] * (grid[1] - grid[0]))
+
+
+def exact_perm_p(x, y, rho_obs, max_n=8):
+    """Exact two-sided permutation p-value for Spearman rho (small samples)."""
+    import itertools
+    import math
+
+    n = len(y)
+    if n > max_n:
+        return None
+    hits = 0
+    total = 0
+    for perm in itertools.permutations(y):
+        total += 1
+        rho = spearmanr(x, perm).statistic
+        if np.isfinite(rho) and abs(rho) >= abs(rho_obs) - 1e-12:
+            hits += 1
+    return hits / math.factorial(n)
+
+
+def assign(pos):
+    for lo, hi, label in BANDS:
+        if lo >= pos >= hi:
+            return label
+    return "unassigned"
+
+
+def metrics_for(spec, grid=GRID):
+    cog, fwhm = oh_metrics(spec, grid)
+    d2 = second_derivative(spec, grid)
+    m = (grid >= 1630) & (grid <= 1700)
+    co = float(grid[m][np.argmax(d2[m])]) if m.any() else float("nan")
+    areas, pos = {}, {}
+    for label, c, tol, hw in AREA_BANDS:
+        a, p = band_area(spec, c, tol, hw, grid)
+        areas[label], pos[label] = a, p
+    ref = areas["Ph 844"] or float("nan")
+    return {
+        "oh_center": cog,
+        "oh_fwhm": fwhm,
+        "c_eq_o": co,
+        "coo_asym": pos["COO- asym"],
+        "coo_sym": pos["COO- sym"],
+        "dcoo": pos["COO- asym"] - pos["COO- sym"],
+        "a_oh": areas["O-H"] / ref,
+        "a_co": areas["amide C=O"] / ref,
+        "as_sym": areas["COO- asym"] / (areas["COO- sym"] or float("nan")),
+    }
+
+
+METRIC_COLS = [
+    ("oh_center", "O-H cog"),
+    ("oh_fwhm", "O-H FWHM"),
+    ("c_eq_o", "C=O"),
+    ("coo_asym", "COO- asym"),
+    ("coo_sym", "COO- sym"),
+    ("dcoo", "dCOO-"),
+    ("a_oh", "A(OH)/A844"),
+    ("a_co", "A(C=O)/A844"),
+    ("as_sym", "as/sym"),
+]
+
+
+# ---------------------------------------------------------------- plotting
+def _clean(ax, grid=GRID, reverse=True):
+    if reverse:
+        ax.set_xlim(grid.max(), grid.min())
+    ax.set_xlabel("Wavenumber (cm$^{-1}$)")
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+
+
+def fig_single(grid, spec, peaks, out, title=""):
+    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=200)
+    ax.plot(grid, spec, lw=0.9, color="#1f3a93")
+    ymax = spec.max()
+    for pos, h, lab in peaks:
+        ax.annotate(f"{pos:.0f}", (pos, h), textcoords="offset points", xytext=(0, 6),
+                    ha="center", fontsize=6, rotation=90)
+    ax.set_ylim(-0.02, ymax * 1.35 if ymax > 0 else 1)
+    ax.set_ylabel("Absorbance (baseline corrected)")
+    ax.set_title(title or "FT-IR spectrum", fontsize=10)
+    _clean(ax, grid)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+def fig_compare(grid, specs, labels, out):
+    fig, ax = plt.subplots(figsize=(9, 6.2), dpi=200)
+    off = 1.05
+    for i, (lab, s) in enumerate(zip(labels, specs)):
+        ax.plot(grid, s + i * off, lw=0.85, color=COLORS[i % len(COLORS)])
+        ax.text(3990, i * off + 0.12, lab, fontsize=7, ha="right",
+                color=COLORS[i % len(COLORS)])
+    ax.set_yticks([])
+    ax.set_ylabel("Absorbance (offset)")
+    ax.set_title("FT-IR comparison", fontsize=10)
+    _clean(ax, grid)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+def fig_deriv(grid, specs, labels, out):
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.4), dpi=200)
+    for i, (lab, s) in enumerate(zip(labels, specs)):
+        d2 = second_derivative(s, grid)
+        m = np.max(np.abs(d2)) or 1
+        axes[0].plot(grid, d2 / m + i * 0.9, lw=0.8, color=COLORS[i % len(COLORS)])
+        axes[0].text(1758, i * 0.9 + 0.12, lab, fontsize=6, color=COLORS[i % len(COLORS)])
+    axes[0].set_xlim(1750, 1300)
+    axes[0].set_yticks([])
+    axes[0].set_title("2nd derivative (band centres)", fontsize=9)
+
+    for i in range(1, len(specs)):
+        d = specs[i] - specs[0]
+        axes[1].plot(grid, d + (i - 1) * 0.55, lw=0.8, color=COLORS[i % len(COLORS)])
+        axes[1].text(1790, (i - 1) * 0.55 + 0.10, f"{labels[i]} - {labels[0]}",
+                     fontsize=6, color=COLORS[i % len(COLORS)])
+    axes[1].axhline(0, color="#999999", lw=0.5, ls="--")
+    axes[1].set_xlim(1800, 600)
+    axes[1].set_yticks([])
+    axes[1].set_title("Difference spectra", fontsize=9)
+
+    for ax in axes:
+        ax.set_xlabel("Wavenumber (cm$^{-1}$)")
+        for s in ("top", "right", "left"):
+            ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+def fig_ratios(labels, metrics, out):
+    fig, ax = plt.subplots(figsize=(7.6, 3.8), dpi=200)
+    xpos = np.arange(len(labels))
+    w = 0.26
+    for k, (key, label, color) in enumerate([
+        ("a_oh", "A(OH)/A844", "#27ae60"),
+        ("a_co", "A(C=O)/A844", "#c0392b"),
+        ("as_sym", "COO- as/sym", "#1f3a93"),
+    ]):
+        vals = [metrics[i][key] for i in range(len(labels))]
+        ax.bar(xpos + (k - 1) * w, vals, width=w, label=label, color=color)
+    ax.set_xticks(xpos)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("ratio")
+    ax.legend(fontsize=6, frameon=False)
+    ax.set_title("Semi-quantitative ratios (internal standard 844 cm$^{-1}$)", fontsize=9)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+def fig_trend(labels, metrics, radii, out):
+    fig, ax = plt.subplots(figsize=(7.2, 4.4), dpi=200)
+    ax.errorbar(radii, [m["dcoo"] for m in metrics], yerr=2.0, marker="s",
+                color="#c0392b", lw=1.0, ms=5, capsize=3, label="dCOO- (cm-1)")
+    ax.set_xlabel("Ionic radius (A)")
+    ax.set_ylabel("dCOO-  (cm$^{-1}$)", color="#c0392b")
+    ax.tick_params(axis="y", labelcolor="#c0392b")
+    ax.invert_xaxis()
+    for lab, r, m in zip(labels, radii, metrics):
+        ax.annotate(lab, (r, m["dcoo"]), textcoords="offset points", xytext=(0, 8),
+                    ha="center", fontsize=7, color="#555555")
+
+    ax2 = ax.twinx()
+    ax2.plot(radii, [m["a_oh"] for m in metrics], "o-", color="#27ae60", lw=1.0, ms=5)
+    ax2.set_ylabel("A(OH)/A844", color="#27ae60")
+    ax2.tick_params(axis="y", labelcolor="#27ae60")
+    ax.set_title("Lanthanide series: splitting vs hydration", fontsize=9)
+    for s in ("top",):
+        ax.spines[s].set_visible(False)
+        ax2.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------- deconvolution
+def pseudo_voigt(x, c, w, h, eta):
+    """Peak of height h, FWHM w, centred at c. eta=1 Lorentzian, eta=0 Gaussian."""
+    z = (x - c) / (w / 2.0)
+    lor = 1.0 / (1.0 + z * z)
+    gau = np.exp(-np.log(2.0) * z * z)
+    return h * (eta * lor + (1.0 - eta) * gau)
+
+
+def deconvolve(grid, spec, lo, hi, centers=None, max_peaks=5, model="voigt"):
+    """Fit overlapping bands in [lo, hi] with constrained pseudo-Voigt components."""
+    from scipy.optimize import least_squares
+
+    m = (grid >= lo) & (grid <= hi)
+    x, y = grid[m], spec[m]
+    if len(x) < 15:
+        raise ValueError("region too narrow, widen --region")
+
+    if centers:
+        init = sorted(float(c) for c in centers)
+    else:
+        idx, _ = find_peaks(y, prominence=max(y.max() * 0.05, 1e-9))
+        if len(idx) == 0:
+            idx = np.array([int(np.argmax(y))])
+        order = np.argsort(y[idx])[::-1][:max_peaks]
+        init = sorted(float(x[i]) for i in idx[order])
+
+    merged = []
+    for c in init:
+        if not merged or abs(c - merged[-1]) > 12.0:
+            merged.append(c)
+    centers = merged
+    k = len(centers)
+
+    ymax = float(y.max())
+    p0, lb, ub = [], [], []
+    for c in centers:
+        h = float(np.interp(c, x, y))
+        p0 += [c, 15.0, max(h, 0.02 * ymax)]
+        lb += [c - 25.0, 4.0, 0.0]
+        ub += [c + 25.0, 120.0, 3.0 * ymax]
+
+    use_eta = model == "voigt"
+    if use_eta:
+        p0.append(0.6)
+        lb.append(0.0)
+        ub.append(1.0)
+
+    def curve(p, xx):
+        eta = p[-1] if use_eta else (1.0 if model == "lorentz" else 0.0)
+        tot = np.zeros_like(xx)
+        for i in range(k):
+            c, w, h = p[3 * i: 3 * i + 3]
+            tot = tot + pseudo_voigt(xx, c, w, h, eta)
+        return tot
+
+    res = least_squares(lambda p: curve(p, x) - y, p0, bounds=(lb, ub), max_nfev=8000)
+    p = res.x
+    eta = p[-1] if use_eta else (1.0 if model == "lorentz" else 0.0)
+
+    comps = []
+    for i in range(k):
+        c, w, h = p[3 * i: 3 * i + 3]
+        cc = pseudo_voigt(x, c, w, h, eta)
+        comps.append({"center": float(c), "fwhm": float(w), "height": float(h),
+                      "area": float(np.trapezoid(cc, x)), "curve": cc})
+    total = sum(c["area"] for c in comps) or 1.0
+    for c in comps:
+        c["share"] = 100.0 * c["area"] / total
+
+    fit = curve(p, x)
+    ss_res = float(np.sum((y - fit) ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2)) or 1.0
+    return {"x": x, "y": y, "fit": fit, "comps": comps,
+            "r2": 1.0 - ss_res / ss_tot,
+            "rms": float(np.sqrt(ss_res / len(y))),
+            "eta": eta, "model": model,
+            "region": (lo, hi)}
+
+
+def fig_deconv(res, out, title=""):
+    x, y, fit = res["x"], res["y"], res["fit"]
+    fig, axes = plt.subplots(2, 1, figsize=(8.6, 5.4), dpi=200,
+                             gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+    ax = axes[0]
+    ax.plot(x, y, lw=1.1, color="#222222", label="measured")
+    ax.plot(x, fit, lw=1.0, ls="--", color="#c0392b", label="fit")
+    for i, c in enumerate(res["comps"]):
+        col = COLORS[i % len(COLORS)]
+        ax.fill_between(x, 0, c["curve"], color=col, alpha=0.15)
+        ax.plot(x, c["curve"], lw=0.8, color=col)
+        ax.annotate(f"{c['center']:.0f}\n({c['fwhm']:.0f})", (c["center"], c["height"]),
+                    textcoords="offset points", xytext=(0, 6), ha="center",
+                    fontsize=6, color=col)
+    ax.set_ylabel("Absorbance")
+    ax.legend(fontsize=7, frameon=False)
+    ax.set_title(title or f"Deconvolution ({res['model']}, R2={res['r2']:.4f})", fontsize=10)
+
+    axes[1].plot(x, y - fit, lw=0.8, color="#7f8c8d")
+    axes[1].axhline(0, color="#999999", lw=0.5, ls="--")
+    axes[1].set_ylabel("residual")
+    axes[1].set_xlabel("Wavenumber (cm$^{-1}$)")
+    axes[1].set_xlim(x.max(), x.min())
+    for a in axes:
+        for s in ("top", "right"):
+            a.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------- chinese tables
+BANDS_CN = [
+    (3600, 3100, "O-H / N-H 伸缩", "醇酚 O-H 为宽包，胺 N-H 较尖，伯胺常双峰；易受水峰干扰"),
+    (3100, 3000, "不饱和 C-H 伸缩（芳环/烯）", "3000 以上为 sp2 C-H"),
+    (3000, 2840, "饱和 C-H 伸缩（烷基）", "常呈 2950/2920/2850 多峰"),
+    (2300, 2100, "三键区（C≡N / C≡C）", "该区通常为空，出峰价值高；2340 双峰多为 CO₂"),
+    (1760, 1735, "酯 C=O 伸缩", "需同时出现 1200 附近强 C-O 才能判为酯"),
+    (1735, 1690, "羧酸 C=O 伸缩", "常与 3300-2500 宽 O-H 同时出现"),
+    (1690, 1630, "酰胺 C=O 伸缩", "酰胺带较宽，常伴 1550 附近 N-H 弯曲"),
+    (1630, 1560, "芳环 C=C / 共轭 C=O", "共轭会使峰位向低波数移动"),
+    (1560, 1530, "COO⁻ 反对称伸缩", "与 1430 附近对称峰成对出现"),
+    (1530, 1495, "N-H 弯曲 / 芳环骨架", "酰胺 II 带"),
+    (1495, 1445, "芳环 C=C / CH₂ 弯曲", ""),
+    (1445, 1395, "COO⁻ 对称伸缩 / CH₃ 弯曲", "与反对称峰共同给出 Δν"),
+    (1370, 1290, "C-N / C-O 伸缩", ""),
+    (1290, 1180, "C-F 伸缩", "含氟化合物常见强峰"),
+    (1180, 1000, "C-O-C / C-O 伸缩", "酯、醚、醇均有，需配合其他证据"),
+    (1000, 900, "骨架振动", ""),
+    (900, 700, "芳环 C-H 面外弯曲", "单取代约 730/690，对位约 830"),
+    (700, 500, "C-Cl / 骨架弯曲", ""),
+]
+
+
+def assign_cn(pos):
+    for lo, hi, name, note in BANDS_CN:
+        if lo >= pos >= hi:
+            return name, note
+    return "未归类", ""
+
+
+def strength_cn(rel):
+    return "强" if rel >= 0.6 else ("中" if rel >= 0.25 else "弱")
+
+
+def shape_cn(fwhm):
+    return "宽包" if fwhm >= 60 else ("中等" if fwhm >= 25 else "尖峰")
+
+
+def phrase_cn(r):
+    """Human-readable description used in the conclusion paragraph."""
+    shape_word = {"尖峰": "峰形尖锐", "中等": "峰形中等", "宽包": "峰形宽钝"}[r["shape"]]
+    strength_word = {"强": "强", "中": "中等强度", "弱": "弱"}[r["strength"]]
+    return f"{strength_word}吸收，{shape_word}（FWHM {r['fwhm']:.0f} cm⁻¹）"
+
+
+def setup_cjk():
+    """Register a Chinese font for matplotlib if available."""
+    from matplotlib import font_manager
+
+    for p in (r"C:\Windows\Fonts\Deng.ttf", r"C:\Windows\Fonts\msyh.ttc",
+              r"C:\Windows\Fonts\simhei.ttf"):
+        if pathlib.Path(p).exists():
+            try:
+                font_manager.fontManager.addfont(p)
+                name = font_manager.FontProperties(fname=p).get_name()
+                plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+                plt.rcParams["axes.unicode_minus"] = False
+                return name
+            except Exception:
+                continue
+    return None
+
+
+# ---------------------------------------------------------------- quality control
+def qc_metrics(path, smooth=9):
+    """Assess whether a spectrum is fit for interpretation."""
+    x, y, is_pct = load_spectrum(path)
+    a_raw = absorbance_on_grid(path)
+    corr = finalize(a_raw, smooth)
+
+    # --- saturation: flat top or very low transmittance
+    if is_pct:
+        t_min = float(np.min(y))
+        saturated = t_min < 5.0
+        sat_text = f"最低透光率 {t_min:.1f}%"
+    else:
+        a_max = float(np.max(a_raw))
+        saturated = a_max > 1.7
+        sat_text = f"最大吸光度 {a_max:.2f}"
+
+    flat = False
+    seg = corr > 0.98 * np.max(corr) if np.max(corr) > 0 else np.array([False])
+    if np.sum(seg) >= 6:  # several consecutive points at the top => flat-topped peak
+        flat = True
+
+    # --- noise & SNR
+    base_sm = savgol_filter(a_raw, 31, 3)
+    resid = a_raw - base_sm
+    noise = 1.4826 * float(np.median(np.abs(resid - np.median(resid))))
+    signal = float(np.max(corr))
+    snr = signal / noise if noise > 0 else float("inf")
+
+    # --- 100% line / baseline offset (4000-3900 usually free of absorption)
+    m = (GRID >= 3900) & (GRID <= 4000)
+    if is_pct:
+        base_dev = 100.0 - float(np.median(y[(x >= 3900) & (x <= 4000)])) if np.any((x >= 3900) & (x <= 4000)) else float("nan")
+        base_text = f"高波数端基线 {100 - base_dev:.1f}%T"
+    else:
+        base_dev = float(np.median(a_raw[m])) if m.any() else float("nan")
+        base_text = f"高波数端基线 {base_dev:+.3f} Abs"
+
+    # --- suspected water / strong H-bonding: broad 3400 envelope
+    p_oh, i_oh = nearest_max(corr, 3400, 250)
+    oh_fwhm = float("nan")
+    if not np.isnan(p_oh):
+        idxs, _ = find_peaks(corr, prominence=0.001)
+        if len(idxs):
+            k = int(np.argmin(np.abs(GRID[idxs] - p_oh)))
+            oh_fwhm = float(peak_widths(corr, [idxs[k]], rel_height=0.5)[0][0]
+                            * (GRID[1] - GRID[0]))
+    water = (not np.isnan(p_oh)) and (not np.isnan(oh_fwhm)) and oh_fwhm >= 120
+
+    # --- atmospheric CO2: the 2349/2360 doublet, not the 667 band
+    co2 = False
+    co2_pos = float("nan")
+    m_co2 = (GRID >= 2320) & (GRID <= 2385)
+    if m_co2.any():
+        idx, _ = find_peaks(corr[m_co2], prominence=max(4 * noise, 0.0015))
+        if len(idx) >= 2:
+            sep = abs(float(GRID[m_co2][idx[0]] - GRID[m_co2][idx[1]]))
+            if 5 <= sep <= 30:
+                co2 = True
+                co2_pos = float(GRID[m_co2][idx[0]])
+
+    return {
+        "path": path, "is_pct": is_pct, "saturated": saturated or flat,
+        "sat_text": sat_text, "flat": flat,
+        "snr": snr, "noise": noise, "signal": signal,
+        "base_dev": base_dev, "base_text": base_text,
+        "water": water, "oh_pos": p_oh, "oh_fwhm": oh_fwhm,
+        "co2": co2, "co2_pos": co2_pos,
+        "corr": corr, "a_raw": a_raw,
+    }
+
+
+def qc_verdict(q):
+    problems, notes = [], []
+    if q["saturated"]:
+        problems.append("峰形饱和" + ("（平头峰）" if q["flat"] else "") +
+                        f"，{q['sat_text']}；建议稀释或减少样品量后重测")
+    if q["snr"] < 3:
+        problems.append(f"信噪比 {q['snr']:.1f} < 3，弱峰不可作为定性依据（GB/T 6040-2019）")
+    if q["water"]:
+        notes.append(f"3400 cm⁻¹ 附近为宽包（FWHM≈{q['oh_fwhm']:.0f}），"
+                     "可能来自吸潮水或强氢键 O-H；建议干燥后复测以区分")
+    if q["co2"]:
+        notes.append(f"{q['co2_pos']:.0f} cm⁻¹ 附近出现双峰，符合大气 CO₂ 特征；建议重采背景")
+    try:
+        if q["is_pct"] and abs(q["base_dev"]) > 5:
+            notes.append(f"高波数端基线偏离 100%T 约 {abs(q['base_dev']):.1f}%，"
+                         "建议重新采集背景")
+        elif (not q["is_pct"]) and abs(q["base_dev"]) > 0.05:
+            notes.append(f"高波数端基线偏移 {q['base_dev']:+.3f} Abs，建议做基线校正")
+    except TypeError:
+        pass
+
+    if problems:
+        level = "不可用"
+    elif notes:
+        level = "需注意"
+    else:
+        level = "合格"
+    return level, problems, notes
+
+
+def fig_qc(q, out, title=""):
+    setup_cjk()
+    fig, ax = plt.subplots(figsize=(9, 3.8), dpi=200)
+    ax.plot(GRID, q["corr"], lw=0.9, color="#1f3a93")
+    marks = []
+    if q["water"]:
+        marks.append((3400, "疑似水峰", "#c0392b"))
+    if q["co2"]:
+        marks.append((2350, "疑似 CO₂", "#e67e22"))
+    for pos, label, color in marks:
+        ax.axvspan(pos - 60, pos + 60, color=color, alpha=0.10)
+        ax.text(pos, np.max(q["corr"]) * 0.92, label, fontsize=8,
+                color=color, ha="center")
+    ax.set_xlim(4000, 400)
+    ax.set_xlabel("波数 (cm$^{-1}$)")
+    ax.set_ylabel("吸光度")
+    ax.set_title(title or "谱图体检", fontsize=10)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------- commands
+def _prepare(files, smooth, subtract=None, factor="1.0", normalize_specs=True):
+    """Load, optionally subtract a reference spectrum, baseline-correct."""
+    ref = absorbance_on_grid(pathlib.Path(subtract)) if subtract else None
+    if ref is not None:
+        mode = "auto" if str(factor).lower() == "auto" else f"{float(factor):.2f}x"
+        print(f"reference: {pathlib.Path(subtract).name} ({mode})")
+    specs = []
+    for f in files:
+        a = absorbance_on_grid(pathlib.Path(f))
+        if ref is not None:
+            fac = auto_sub_factor(a, ref) if str(factor).lower() == "auto" else float(factor)
+            a = a - fac * ref
+            print(f"  {pathlib.Path(f).name}: factor = {fac:.3f}")
+        final = finalize(a, smooth)
+        specs.append(normalize(final) if normalize_specs else final)
+    if ref is not None:
+        print()
+    return specs
+
+
+def cmd_single(args):
+    path = pathlib.Path(args.file)
+    spec = _prepare([args.file], args.smooth, args.subtract, args.sub_factor,
+                    normalize_specs=False)[0]
+    grid = GRID
+    maxima = detect_maxima(spec, grid, prominence=args.prominence)
+    pos, inten = maxima
+    if len(pos) == 0:
+        sys.exit("no peaks detected - check data or lower --prominence")
+
+    order = np.argsort(inten)[::-1][: args.peaks]
+    keep = np.sort(order)
+    rows = []
+    for i, k in enumerate(keep, 1):
+        p, h = float(pos[k]), float(inten[k])
+        w = float(peak_widths(spec, [np.argmin(np.abs(grid - p))], rel_height=0.5)[0][0]
+                  * (grid[1] - grid[0]))
+        rows.append({"no": i, "pos": p, "abs": h, "fwhm": w,
+                     "area": 1.064 * h * w, "assign": assign(p)})
+
+    print(f"File: {path.name}")
+    print(f"Peaks: {len(rows)} (top {args.peaks} by prominence)\n")
+    print(f"{'#':>2} {'pos':>8} {'abs':>8} {'FWHM':>7} {'area':>8}  assignment")
+    print("-" * 70)
+    for r in rows:
+        print(f"{r['no']:>2} {r['pos']:>8.1f} {r['abs']:>8.3f} {r['fwhm']:>7.1f} "
+              f"{r['area']:>8.2f}  {r['assign']}")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^\w.-]+", "_", path.stem)
+    csv_path = out / f"{stem}_peaks.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    png_path = out / f"{stem}_annotated.png"
+    fig_single(grid, spec, [(r["pos"], r["abs"], r["assign"]) for r in rows],
+               png_path, title=path.name)
+    print(f"\nsaved: {csv_path}\nsaved: {png_path}")
+
+
+def cmd_compare(args):
+    specs = _prepare(args.files, args.smooth, args.subtract, args.sub_factor)
+    labels = args.labels.split(",") if args.labels else [pathlib.Path(f).stem for f in args.files]
+    if len(labels) != len(specs):
+        sys.exit("--labels count must match number of files")
+
+    rows = []
+    for name, center, tol in KEY_BANDS:
+        row = {"band": f"{name} (~{center})"}
+        for lab, s in zip(labels, specs):
+            p, _ = nearest_max(s, center, tol)
+            row[lab] = f"{p:.0f}" if not np.isnan(p) else "-"
+        rows.append(row)
+
+    print("=== band positions (cm-1) ===")
+    print(f"{'band':<22}" + "".join(f"{lab:>12}" for lab in labels))
+    print("-" * (22 + 12 * len(labels)))
+    for r in rows:
+        print(f"{r['band']:<22}" + "".join(f"{r[lab]:>12}" for lab in labels))
+
+    print("\n=== spectral similarity (Pearson r) ===")
+    print(" " * 10 + "".join(f"{lab:>10}" for lab in labels))
+    for i, lab in enumerate(labels):
+        cells = "".join(f"{np.corrcoef(specs[i], specs[j])[0, 1]:>10.3f}"
+                        for j in range(len(labels)))
+        print(f"{lab:>10}{cells}")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    csv_path = out / "band_comparison.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    png_path = out / "comparison.png"
+    fig_compare(GRID, specs, labels, png_path)
+    print(f"\nsaved: {csv_path}\nsaved: {png_path}")
+
+
+def cmd_detail(args):
+    specs = _prepare(args.files, args.smooth, args.subtract, args.sub_factor)
+    labels = args.labels.split(",") if args.labels else [pathlib.Path(f).stem for f in args.files]
+    if len(labels) != len(specs):
+        sys.exit("--labels count must match number of files")
+
+    mets = [metrics_for(s) for s in specs]
+    print(f"{'sample':<12}" + "".join(f"{n:>13}" for _, n in METRIC_COLS))
+    print("-" * (12 + 13 * len(METRIC_COLS)))
+    for lab, m in zip(labels, mets):
+        print(f"{lab:<12}" + "".join(f"{m[k]:>13.2f}" for k, _ in METRIC_COLS))
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    csv_path = out / "metrics.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["metric"] + labels)
+        for k, _ in METRIC_COLS:
+            w.writerow([k] + [f"{m[k]:.3f}" for m in mets])
+    fig_deriv(GRID, specs, labels, out / "second_derivative.png")
+    fig_ratios(labels, mets, out / "ratios.png")
+    print(f"\nsaved: {csv_path}")
+    print(f"saved: {out / 'second_derivative.png'}")
+    print(f"saved: {out / 'ratios.png'}")
+
+
+def cmd_series(args):
+    specs = _prepare(args.files, args.smooth, args.subtract, args.sub_factor)
+    labels = args.labels.split(",") if args.labels else [pathlib.Path(f).stem for f in args.files]
+    if not args.radii:
+        sys.exit("--radii required, e.g. --radii 1.143,1.066,1.053,1.040")
+    radii = [float(v) for v in args.radii.split(",")]
+    if not (len(labels) == len(specs) == len(radii)):
+        sys.exit("files / labels / radii counts must match")
+
+    mets = [metrics_for(s) for s in specs]
+    print(f"{'sample':<12}{'radius':>9}" + "".join(f"{n:>13}" for _, n in METRIC_COLS))
+    print("-" * (21 + 13 * len(METRIC_COLS)))
+    for lab, r, m in zip(labels, radii, mets):
+        print(f"{lab:<12}{r:>9.3f}" + "".join(f"{m[k]:>13.2f}" for k, _ in METRIC_COLS))
+
+    print("\n=== rank correlation vs ionic radius (exact permutation test) ===")
+    for k, n in METRIC_COLS:
+        vals = np.array([m[k] for m in mets], dtype=float)
+        if np.all(np.isfinite(vals)) and np.std(vals) > 0:
+            rho = spearmanr(radii, vals).statistic
+            pe = exact_perm_p(np.asarray(radii, dtype=float), vals, rho)
+            tag = f"{pe:.3f}" if pe is not None else "n/a"
+            print(f"  {n:<14} rho = {rho:+.2f}   p_exact = {tag}")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    fig_trend(labels, mets, radii, out / "trend.png")
+    fig_compare(GRID, specs, labels, out / "comparison.png")
+    csv_path = out / "series_metrics.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["sample", "radius"] + [k for k, _ in METRIC_COLS])
+        for lab, r, m in zip(labels, radii, mets):
+            w.writerow([lab, r] + [f"{m[k]:.3f}" for k, _ in METRIC_COLS])
+    print(f"\nsaved: {csv_path}")
+    print(f"saved: {out / 'trend.png'}")
+    print(f"saved: {out / 'comparison.png'}")
+
+
+def cmd_deconv(args):
+    spec = _prepare([args.file], args.smooth, args.subtract, args.sub_factor,
+                    normalize_specs=False)[0]
+    lo, hi = [float(v) for v in args.region.split(",")]
+    lo, hi = min(lo, hi), max(lo, hi)
+    centers = [float(v) for v in args.centers.split(",")] if args.centers else None
+    try:
+        res = deconvolve(GRID, spec, lo, hi, centers, args.max_peaks, args.model)
+    except ValueError as exc:
+        sys.exit(str(exc))
+
+    print(f"region {lo:.0f}-{hi:.0f} cm-1 | model {res['model']} | "
+          f"components {len(res['comps'])} | eta {res['eta']:.2f}")
+    print(f"R2 = {res['r2']:.4f} | residual RMS = {res['rms']:.4f}\n")
+    print(f"{'#':>2} {'centre':>9} {'FWHM':>8} {'height':>9} {'area':>9} {'share':>8}")
+    print("-" * 50)
+    for i, c in enumerate(res["comps"], 1):
+        print(f"{i:>2} {c['center']:>9.1f} {c['fwhm']:>8.1f} {c['height']:>9.4f} "
+              f"{c['area']:>9.3f} {c['share']:>7.1f}%")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^\w.-]+", "_", pathlib.Path(args.file).stem)
+    tag = f"{stem}_{lo:.0f}-{hi:.0f}"
+    csv_path = out / f"{tag}_deconv.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(["component", "centre_cm-1", "fwhm_cm-1", "height", "area", "share_%"])
+        for i, c in enumerate(res["comps"], 1):
+            w.writerow([i, f"{c['center']:.2f}", f"{c['fwhm']:.2f}",
+                        f"{c['height']:.4f}", f"{c['area']:.4f}", f"{c['share']:.1f}"])
+        w.writerow([])
+        w.writerow(["R2", f"{res['r2']:.4f}"])
+        w.writerow(["residual_RMS", f"{res['rms']:.4f}"])
+    png_path = out / f"{tag}_deconv.png"
+    fig_deconv(res, png_path,
+               title=f"{pathlib.Path(args.file).name}  {lo:.0f}-{hi:.0f} cm-1"
+                     f"  ({res['model']}, R2={res['r2']:.4f})")
+    print(f"\nsaved: {csv_path}\nsaved: {png_path}")
+
+
+def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02):
+    rng = float(np.max(spec) - np.min(spec)) or 1.0
+    idx, props = find_peaks(spec, prominence=rng * prom_frac, distance=3)
+    if len(idx) == 0:
+        return []
+    order = np.argsort(props["prominences"])[::-1][:max_n]
+    idx = np.sort(idx[order])
+    top = float(np.max(spec)) or 1.0
+    rows = []
+    for i in idx:
+        pos = float(grid[i])
+        h = float(spec[i])
+        w = float(peak_widths(spec, [i], rel_height=0.5)[0][0] * (grid[1] - grid[0]))
+        name, note = assign_cn(pos)
+        rows.append({"pos": pos, "abs": h, "rel": h / top, "fwhm": w,
+                     "strength": strength_cn(h / top), "shape": shape_cn(w),
+                     "band": name, "note": note})
+    return rows
+
+
+def _row_in(rows, lo, hi):
+    cand = [r for r in rows if lo >= r["pos"] >= hi]
+    return max(cand, key=lambda r: r["abs"]) if cand else None
+
+
+def build_conclusion(rows, q=None):
+    """Plain-language summary in the style reviewers expect."""
+    parts, feats = [], []
+
+    co_amide = _row_in(rows, 1690, 1630)
+    co_acid = _row_in(rows, 1735, 1690)
+    co_ester = _row_in(rows, 1760, 1735)
+    c_eq_o = co_ester or co_acid or co_amide
+    if c_eq_o:
+        kind = "酯 C=O" if c_eq_o is co_ester else ("羧酸 C=O" if c_eq_o is co_acid else "酰胺 C=O")
+        parts.append(f"{c_eq_o['pos']:.0f} cm⁻¹ 处出现{phrase_cn(c_eq_o)}，"
+                     f"符合{kind} 伸缩振动")
+        feats.append(kind.replace(" C=O", "基"))
+
+    oh = _row_in(rows, 3600, 3100)
+    if oh:
+        parts.append(f"{oh['pos']:.0f} cm⁻¹ 处出现{phrase_cn(oh)}，属 O-H / N-H 伸缩")
+        feats.append("羟基或氨基")
+
+    coo_as = _row_in(rows, 1560, 1530)
+    coo_sym = _row_in(rows, 1445, 1395)
+    if coo_as and coo_sym:
+        d = coo_as["pos"] - coo_sym["pos"]
+        parts.append(f"{coo_as['pos']:.0f} 与 {coo_sym['pos']:.0f} cm⁻¹ 成对出现，"
+                     f"符合羧酸根反对称/对称伸缩（Δν = {d:.0f} cm⁻¹）")
+        feats.append("羧酸盐")
+
+    arom = _row_in(rows, 1630, 1560)
+    para = _row_in(rows, 900, 800)
+    mono = _row_in(rows, 780, 680)
+    if arom:
+        sub = ""
+        if para and 830 <= para["pos"] <= 870:
+            sub = f"，且 {para['pos']:.0f} cm⁻¹ 有对位取代特征"
+        elif mono:
+            sub = f"，且 {mono['pos']:.0f} cm⁻¹ 有单取代面外弯曲"
+        parts.append(f"{arom['pos']:.0f} cm⁻¹ 出现芳环骨架振动{sub}")
+        feats.append("芳环")
+
+    cf = _row_in(rows, 1290, 1180)
+    if cf:
+        parts.append(f"{cf['pos']:.0f} cm⁻¹ 强峰符合 C-F 伸缩")
+        feats.append("含氟")
+
+    ali = _row_in(rows, 3000, 2840)
+    if ali and not oh:
+        parts.append(f"{ali['pos']:.0f} cm⁻¹ 为饱和 C-H 伸缩")
+        feats.append("烷基")
+
+    summary = "；".join(parts) if parts else "未识别到明确官能团特征"
+    uniq = list(dict.fromkeys(feats))
+    verdict = (f"综合判断：样品含{'、'.join(uniq)}结构。") if uniq \
+        else "综合判断：谱图信息不足，建议结合其他手段。"
+
+    caveat = []
+    if q and q.get("water"):
+        caveat.append("3400 cm⁻¹ 宽包同时可能来自吸潮水，建议干燥后复测以排除干扰")
+    if q and q.get("co2"):
+        caveat.append("2340 / 667 cm⁻¹ 疑似大气 CO₂，建议重采背景")
+    return summary, verdict, caveat
+
+
+def _report(outdir, name, lines):
+    out = pathlib.Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    p = out / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def cmd_check(args):
+    path = pathlib.Path(args.file)
+    q = qc_metrics(path, args.smooth)
+    level, problems, notes = qc_verdict(q)
+
+    print(f"=== 谱图体检：{path.name} ===")
+    print(f"结论：{level}\n")
+    print(f"· 信号：{q['sat_text']}｜信噪比 {q['snr']:.1f}")
+    print(f"· 基线：{q['base_text']}")
+    if q["water"]:
+        print(f"· 宽包：3400 cm⁻¹（FWHM≈{q['oh_fwhm']:.0f}）→ 可能为吸潮水或强氢键 O-H")
+    if q["co2"]:
+        print(f"· CO₂：{q['co2_pos']:.0f} cm⁻¹ 出现双峰 → 疑似大气 CO₂ 残留")
+    for p in problems:
+        print(f"  [!] {p}")
+    for n in notes:
+        print(f"  [注意] {n}")
+    if level == "合格":
+        print("  [OK] 未发现明显干扰，可用于解析")
+
+    out = pathlib.Path(args.outdir)
+    png = out / f"{path.stem}_qc.png"
+    out.mkdir(parents=True, exist_ok=True)
+    fig_qc(q, png, title=f"{path.name} 谱图体检")
+    md = _report(args.outdir, f"{path.stem}_qc.md", [
+        f"# 谱图体检：{path.name}", "",
+        f"**结论：{level}**", "",
+        f"- 信号：{q['sat_text']}；信噪比 {q['snr']:.1f}",
+        f"- 基线：{q['base_text']}",
+        f"- 宽包：{'3400 cm⁻¹ 宽包，可能为水或强氢键' if q['water'] else '未见'}",
+        f"- CO₂：{'2340 附近双峰，疑似大气残留' if q['co2'] else '未见'}",
+        "", "## 提示",
+        *([f"- {x}" for x in problems + notes] or ["- 无"]),
+        "", f"![qc]({png.name})",
+    ])
+    print(f"\nsaved: {png}\nsaved: {md}")
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": True, "file": str(path), "verdict": level,
+            "metrics": {"snr": round(q["snr"], 1),
+                        "saturated": bool(q["saturated"]),
+                        "water_suspect": bool(q["water"]),
+                        "co2_suspect": bool(q["co2"]),
+                        "oh_fwhm": None if np.isnan(q["oh_fwhm"]) else round(float(q["oh_fwhm"]), 1),
+                        "baseline": q["base_text"]},
+            "problems": problems, "notes": notes,
+            "report": str(md), "figure": str(png),
+        }, ensure_ascii=False, indent=2))
+
+
+def cmd_read(args):
+    path = pathlib.Path(args.file)
+    q = qc_metrics(path, args.smooth)
+    spec = _prepare([args.file], args.smooth, args.subtract, args.sub_factor,
+                    normalize_specs=False)[0]
+    rows = _peak_rows(spec, max_n=args.peaks)
+    wide = _peak_rows(spec, max_n=args.peaks + 10)
+    for lo, hi in [(1560, 1530)]:  # never drop the carboxylate asymmetric band
+        if not any(lo >= r["pos"] >= hi for r in rows):
+            cand = [r for r in wide if lo >= r["pos"] >= hi]
+            if cand:
+                rows.append(max(cand, key=lambda r: r["abs"]))
+    rows.sort(key=lambda r: r["pos"])
+    if not rows:
+        sys.exit("未识别到明显吸收峰，请检查数据或降低阈值")
+
+    summary, verdict, caveat = build_conclusion(rows, q)
+
+    print(f"=== 谱图解析：{path.name} ===")
+    print(f"{'峰位':>8} {'强度':>4} {'峰形':>5} {'FWHM':>6}  参考归属")
+    print("-" * 62)
+    for r in rows:
+        print(f"{r['pos']:>8.0f} {r['strength']:>4} {r['shape']:>5} "
+              f"{r['fwhm']:>6.0f}  {r['band']}")
+    print("\n【结论】")
+    print(summary + "。")
+    print(verdict)
+    for c in caveat:
+        print(f"[注意] {c}")
+    print("\n【局限】红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型；"
+          "晶型需 XRD 佐证，结构确认需 NMR / MS 配合。")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    png = out / f"{path.stem}_read.png"
+    setup_cjk()
+    fig, ax = plt.subplots(figsize=(9, 4.4), dpi=200)
+    ax.plot(GRID, spec, lw=0.9, color="#1f3a93")
+    top = max(np.max(spec), 1e-9)
+    for r in rows:
+        ax.annotate(f"{r['pos']:.0f}", (r["pos"], r["abs"]), textcoords="offset points",
+                    xytext=(0, 6), ha="center", fontsize=7, rotation=90)
+    ax.set_ylim(-0.02 * top, top * 1.35)
+    ax.set_xlim(4000, 400)
+    ax.set_xlabel("波数 (cm$^{-1}$)")
+    ax.set_ylabel("吸光度")
+    ax.set_title(f"{path.name} 谱图解析", fontsize=10)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(png)
+    plt.close(fig)
+
+    md = _report(args.outdir, f"{path.stem}_read.md", [
+        f"# 谱图解析：{path.name}", "",
+        "## 峰表", "",
+        "| 峰位 (cm⁻¹) | 强度 | 峰形 | FWHM | 参考归属 |",
+        "|---|---|---|---|---|",
+        *[f"| {r['pos']:.0f} | {r['strength']} | {r['shape']} | {r['fwhm']:.0f} "
+          f"| {r['band']} |" for r in rows],
+        "", "## 结论", "",
+        summary + "。", "", verdict, "",
+        *([f"> 注意：{c}" for c in caveat] + [""] if caveat else []),
+        "## 局限", "",
+        "红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型；"
+        "晶型需 XRD 佐证，结构确认需 NMR / MS 配合。", "",
+        f"![spectrum]({png.name})",
+    ])
+    print(f"\nsaved: {png}\nsaved: {md}")
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": True, "file": str(path),
+            "peaks": [{"pos": round(r["pos"], 1), "strength": r["strength"],
+                       "shape": r["shape"], "fwhm": round(r["fwhm"], 1),
+                       "band": r["band"]} for r in rows],
+            "conclusion": summary + "。" + verdict,
+            "caveats": caveat,
+            "limitation": "红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型。",
+            "report": str(md), "figure": str(png),
+        }, ensure_ascii=False, indent=2))
+
+
+def cmd_match(args):
+    sm_path, ref_path = pathlib.Path(args.sample), pathlib.Path(args.reference)
+    s = normalize(finalize(absorbance_on_grid(sm_path), args.smooth))
+    r = normalize(finalize(absorbance_on_grid(ref_path), args.smooth))
+
+    r_all = float(np.corrcoef(s, r)[0, 1])
+    fp = GRID <= 1500
+    r_fp = float(np.corrcoef(s[fp], r[fp])[0, 1])
+
+    ps, _ = detect_maxima(s)
+    pr, _ = detect_maxima(r)
+    deltas, unmatched_s = [], []
+    for p in ps:
+        if len(pr) == 0:
+            unmatched_s.append(p)
+            continue
+        j = int(np.argmin(np.abs(pr - p)))
+        if abs(pr[j] - p) <= 15:
+            deltas.append(p - pr[j])
+        else:
+            unmatched_s.append(p)
+    max_dev = float(np.max(np.abs(deltas))) if deltas else float("nan")
+
+    d = s - r
+    local_noise = 1.4826 * float(np.median(np.abs(d - np.median(d))))
+    thr = max(0.06, 3 * local_noise)
+    hits = np.abs(d) > thr
+    regions = []
+    i = 0
+    while i < len(hits):
+        if hits[i]:
+            j = i
+            while j + 1 < len(hits) and hits[j + 1]:
+                j += 1
+            if j - i >= 3:
+                seg = d[i:j + 1]
+                k = int(np.argmax(np.abs(seg)))
+                regions.append((float(GRID[i + k]), float(seg[k]), int(j - i + 1)))
+            i = j + 1
+        else:
+            i += 1
+    regions.sort(key=lambda t: -abs(t[1]))
+    regions = regions[:5]
+
+    thr_r = args.threshold
+    big_region = any(abs(v) > 0.12 for _, v, _ in regions)
+    if r_all >= thr_r and (np.isnan(max_dev) or max_dev <= 5) and not big_region:
+        verdict = "一致"
+    elif r_all >= 0.95 and (np.isnan(max_dev) or max_dev <= 10):
+        verdict = "需复核"
+    else:
+        verdict = "不一致"
+
+    print(f"=== 谱图比对：{sm_path.name}  vs  {ref_path.name} ===")
+    print(f"判定：{verdict}\n")
+    print(f"· 全谱相关系数 r = {r_all:.4f}（阈值 {thr_r:.2f}）")
+    print(f"· 指纹区（≤1500）r = {r_fp:.4f}")
+    if not np.isnan(max_dev):
+        print(f"· 峰位最大偏差 {max_dev:.0f} cm⁻¹（限值 ±5）")
+    print(f"· 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个")
+    if regions:
+        print("· 主要差异区：")
+        for pos, val, w in regions:
+            print(f"    {pos:.0f} cm⁻¹  {'样品更强' if val > 0 else '对照更强'} "
+                  f"（ΔA {val:+.3f}）")
+    else:
+        print("· 未发现显著差异区")
+
+    out = pathlib.Path(args.outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    png = out / f"{sm_path.stem}_vs_{ref_path.stem}.png"
+    setup_cjk()
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6.2), dpi=200,
+                             gridspec_kw={"height_ratios": [2, 1]}, sharex=True)
+    axes[0].plot(GRID, r, lw=0.9, color="#7f8c8d", label=f"对照 {ref_path.name}")
+    axes[0].plot(GRID, s, lw=0.9, color="#1f3a93", label=f"样品 {sm_path.name}")
+    axes[0].legend(fontsize=7, frameon=False)
+    axes[0].set_ylabel("吸光度")
+    axes[0].set_title(f"谱图比对（r={r_all:.4f}，判定：{verdict}）", fontsize=10)
+    axes[1].plot(GRID, d, lw=0.8, color="#c0392b")
+    axes[1].axhline(0, color="#999999", lw=0.5, ls="--")
+    for pos, val, w in regions:
+        axes[1].axvspan(pos - w, pos + w, color="#e67e22", alpha=0.15)
+    axes[1].set_ylabel("差值")
+    axes[1].set_xlabel("波数 (cm$^{-1}$)")
+    axes[1].set_xlim(4000, 400)
+    for a in axes:
+        for sp in ("top", "right"):
+            a.spines[sp].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(png)
+    plt.close(fig)
+
+    md = _report(args.outdir, f"{sm_path.stem}_vs_{ref_path.stem}.md", [
+        f"# 谱图比对：{sm_path.name} vs {ref_path.name}", "",
+        f"**判定：{verdict}**", "",
+        f"- 全谱相关系数 r = {r_all:.4f}（阈值 {thr_r:.2f}）",
+        f"- 指纹区相关系数 r = {r_fp:.4f}",
+        f"- 峰位最大偏差：{'—' if np.isnan(max_dev) else f'{max_dev:.0f} cm⁻¹'}（限值 ±5）",
+        f"- 匹配峰 {len(deltas)} 个，未匹配 {len(unmatched_s)} 个",
+        "", "## 主要差异区", "",
+        *([f"- {pos:.0f} cm⁻¹：{'样品更强' if v > 0 else '对照更强'}（ΔA {v:+.3f}）"
+           for pos, v, _ in regions] or ["- 未发现显著差异"]),
+        "", "> 判定阈值说明：相关系数阈值 0.98 为常用经验值，正式检验应按"
+        "中国药典 0402 要求预设并经专属性验证；峰位偏差限值 ±5 cm⁻¹ 引自药典。",
+        "", f"![compare]({png.name})",
+    ])
+    print(f"\nsaved: {png}\nsaved: {md}")
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "ok": True, "sample": str(sm_path), "reference": str(ref_path),
+            "verdict": verdict,
+            "metrics": {"r_full": round(r_all, 4), "r_fingerprint": round(r_fp, 4),
+                        "max_peak_deviation": None if np.isnan(max_dev) else round(max_dev, 1),
+                        "matched_peaks": len(deltas), "unmatched_peaks": len(unmatched_s)},
+            "differences": [{"pos": round(pos, 0), "who": "sample" if v > 0 else "reference",
+                             "delta_absorbance": round(v, 3)} for pos, v, _ in regions],
+            "report": str(md), "figure": str(png),
+        }, ensure_ascii=False, indent=2))
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(
+        prog="ftir", description="Standalone FT-IR analysis toolkit")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(p, multi=False):
+        if multi:
+            p.add_argument("files", nargs="+", help="spectrum files")
+        else:
+            p.add_argument("file", help="spectrum file")
+        p.add_argument("--outdir", "-o", default="output", help="output directory")
+        p.add_argument("--smooth", type=int, default=9, help="Savitzky-Golay window (odd)")
+        p.add_argument("--labels", help="comma-separated sample labels")
+        p.add_argument("--subtract", help="reference spectrum to subtract (e.g. KBr blank)")
+        p.add_argument("--sub-factor", default="1.0",
+                       help="subtraction scale: a number or 'auto' (default 1.0)")
+        p.add_argument("--json", action="store_true", help="also print machine-readable JSON")
+
+    p1 = sub.add_parser("single", help="one spectrum: peak table + figure")
+    common(p1)
+    p1.add_argument("--peaks", type=int, default=20)
+    p1.add_argument("--prominence", type=float, default=0.02)
+    p1.set_defaults(func=cmd_single)
+
+    p2 = sub.add_parser("compare", help="band positions + similarity + overlay")
+    common(p2, multi=True)
+    p2.set_defaults(func=cmd_compare)
+
+    p3 = sub.add_parser("detail", help="metrics, 2nd derivative, area ratios")
+    common(p3, multi=True)
+    p3.set_defaults(func=cmd_detail)
+
+    p4 = sub.add_parser("series", help="detail + trend vs ionic radius")
+    common(p4, multi=True)
+    p4.add_argument("--radii", help="comma-separated ionic radii in Angstrom")
+    p4.set_defaults(func=cmd_series)
+
+    p5 = sub.add_parser("deconv", help="fit overlapping bands in a region")
+    common(p5)
+    p5.add_argument("--region", default="1500,1750",
+                    help="fitting window, e.g. 1500,1750 (default)")
+    p5.add_argument("--max-peaks", type=int, default=5, help="max components to auto-detect")
+    p5.add_argument("--centers", help="manual initial centres, e.g. 1652,1600,1552")
+    p5.add_argument("--model", default="voigt", choices=["voigt", "lorentz", "gauss"],
+                    help="band shape (default voigt)")
+    p5.set_defaults(func=cmd_deconv)
+
+    p6 = sub.add_parser("check", help="谱图体检：这张谱能不能用")
+    common(p6)
+    p6.set_defaults(func=cmd_check)
+
+    p7 = sub.add_parser("read", help="一键解谱：峰表 + 归属 + 结论")
+    common(p7)
+    p7.add_argument("--peaks", type=int, default=10)
+    p7.set_defaults(func=cmd_read)
+
+    p8 = sub.add_parser("match", help="与对照谱比对，给出判定")
+    p8.add_argument("sample", help="样品谱文件")
+    p8.add_argument("reference", help="对照谱文件")
+    p8.add_argument("--outdir", "-o", default="output")
+    p8.add_argument("--smooth", type=int, default=9)
+    p8.add_argument("--threshold", type=float, default=0.98,
+                    help="相关系数判定阈值（默认 0.98）")
+    p8.add_argument("--json", action="store_true", help="同时输出机器可读 JSON")
+    p8.set_defaults(func=cmd_match)
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
+    targets = []
+    for attr in ("files", "file", "sample", "reference"):
+        v = getattr(args, attr, None)
+        if isinstance(v, list):
+            targets.extend(v)
+        elif v:
+            targets.append(v)
+    for f in targets:
+        if not pathlib.Path(f).exists():
+            sys.exit(f"file not found: {f}")
+    if getattr(args, "subtract", None) and not pathlib.Path(args.subtract).exists():
+        sys.exit(f"reference not found: {args.subtract}")
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
