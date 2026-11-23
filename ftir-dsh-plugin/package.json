@@ -18,6 +18,15 @@
     "chemistry"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coffee401/ftir-toolkit.git",
+    "directory": "ftir-dsh-plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/coffee401/ftir-toolkit/issues"
+  },
+  "homepage": "https://github.com/coffee401/ftir-toolkit#readme",
   "engines": {
     "node": ">=22.19.0"
   },
