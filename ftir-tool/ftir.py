@@ -16,6 +16,9 @@ import argparse
 import csv
 import json
 import pathlib
+import urllib.error
+import urllib.parse
+import urllib.request
 import re
 import sys
 
@@ -1145,6 +1148,161 @@ def build_conclusion(rows, q=None):
     return summary, verdict, caveat, supported
 
 
+# ---------------------------------------------------------------- literature aids
+GROUP_KEYWORDS = {
+    "羧酸盐": ["carboxylate", "FTIR"],
+    "酰胺": ["amide", "FTIR"],
+    "酯": ["ester", "FTIR"],
+    "羧酸": ["carboxylic acid", "FTIR"],
+    "芳环": ["aromatic", "FTIR"],
+    "氟代结构": ["C-F", "fluorine", "FTIR"],
+    "烷基": ["alkyl", "FTIR"],
+}
+
+DATABASES = [
+    ("NIST Chemistry WebBook（气相/凝相参考谱）", "https://webbook.nist.gov/chemistry/"),
+    ("SDBS 有机物谱库（AIST，含 IR/Raman/NMR/MS）", "https://sdbs.db.aist.go.jp/"),
+    ("PubChem（化合物 + 部分实验谱）", "https://pubchem.ncbi.nlm.nih.gov/"),
+    ("Coblentz Society 光谱数据库（需订阅）", "https://www.coblentz.org/"),
+]
+
+
+def _http_json(url, timeout=6.0):
+    req = urllib.request.Request(url, headers={"User-Agent": "ftir-tool/0.3"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+IR_WORDS = ("infrared", "ftir", "ft-ir", "ir spectr", "vibrational spectr",
+            "spectroscopic", "spectroscopy", "raman")
+METHOD_WORDS = ("interpretation", "assignment", "characteristic", "frequencies",
+                "frequency", "review", "identification", "guideline", "practical",
+                "spectra of", "spectral")
+
+# Curated, verified methodological reading. Shown on every report.
+CURATED_READING = [
+    ("Socrates, Infrared and Raman Characteristic Group Frequencies (3rd ed., Wiley 2004)"
+     " — 归属区间的一手依据", "https://books.google.com/books?id=LDoAAjMnwEIC"),
+    ("Coates, Interpretation of Infrared Spectra: A Practical Approach"
+     " — 官能团区/指纹区判读流程", "https://www.sciencedirect.com/topics/materials-science/group-frequency"),
+    ("Interpretation of FTIR Spectra: A Practical Approach in the Polymer/Plastic"
+     " Thermal Decomposition, Indones. J. Sci. Technol. 2022 — 面向实操的判读示例",
+     "https://doi.org/10.17509/ijost.v8i1.53297"),
+    ("中国药典 2025 四部 0402 — 鉴别判据与阈值要求",
+     "https://2025.chp.org.cn/#/item?bookId=4&entryId=5578"),
+]
+
+
+def _ir_relevant(title):
+    """Keep only titles that are both IR-related and methodological."""
+    t = (title or "").lower()
+    return any(w in t for w in IR_WORDS) and any(w in t for w in METHOD_WORDS)
+
+
+def _openalex(query, timeout=10.0):
+    url = ("https://api.openalex.org/works?search=" + urllib.parse.quote(query)
+           + "&filter=type:article&per-page=15"
+           "&select=title,publication_year,doi,primary_location")
+    out = []
+    for it in _http_json(url, timeout).get("results", []):
+        title = (it.get("title") or "").strip()
+        if not title or not _ir_relevant(title):
+            continue
+        src = ((it.get("primary_location") or {}).get("source") or {}).get("display_name") or ""
+        out.append({
+            "title": title[:170],
+            "source": src,
+            "year": str(it.get("publication_year") or ""),
+            "doi": (it.get("doi") or "").replace("https://doi.org/", ""),
+            "url": it.get("doi") or "",
+        })
+    return out
+
+
+def _europepmc(query, timeout=10.0):
+    url = ("https://www.ebi.ac.uk/europepmc/webservices/rest/search?query="
+           + urllib.parse.quote(query) + "&format=json&pageSize=15&resultType=lite")
+    out = []
+    for it in _http_json(url, timeout).get("resultList", {}).get("result", []):
+        title = (it.get("title") or "").strip()
+        if not title or not _ir_relevant(title):
+            continue
+        doi = it.get("doi") or ""
+        out.append({
+            "title": title[:170],
+            "source": it.get("journalTitle") or "",
+            "year": it.get("pubYear") or "",
+            "doi": doi,
+            "url": f"https://doi.org/{doi}" if doi
+                   else f"https://europepmc.org/article/{it.get('source', 'MED')}/{it.get('id', '')}",
+        })
+    return out
+
+
+def literature_hints(supported, timeout=10.0, limit=5):
+    """Open-literature leads for similar band descriptions.
+
+    Only titles that actually mention infrared/FTIR/Raman are kept; anything else
+    is dropped rather than shown, because irrelevant hits are worse than none.
+    Returns (hits, notes).
+    """
+    kws = []
+    for g in supported:
+        kws.extend(GROUP_KEYWORDS.get(g, []))
+    if not kws:
+        return [], ["未形成可用的官能团假设，未发起检索"]
+
+    seen, hits, notes = set(), [], []
+    query = ("FTIR infrared band assignment interpretation characteristic frequencies "
+             + " ".join(dict.fromkeys(kws)))
+    epmc_query = ('(FTIR OR "infrared spectroscopy") AND ('
+                  + " OR ".join(dict.fromkeys(GROUP_KEYWORDS.get(g, ["chemistry"])[0]
+                                              for g in supported)) + ')')
+
+    for name, fn, need in (("OpenAlex", _openalex, 0), ("Europe PMC", _europepmc, 3)):
+        if len(hits) >= limit or len(hits) >= need and need and len(hits) >= 3:
+            break
+        try:
+            for h in fn(query if name == "OpenAlex" else epmc_query,
+                        timeout if name == "OpenAlex" else 6.0):
+                key = (h["doi"] or h["title"][:60]).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(h)
+                if len(hits) >= limit:
+                    break
+        except Exception as e:  # network may be unavailable
+            notes.append(f"{name} 检索失败：{type(e).__name__}")
+
+    if not hits:
+        notes.append("未检索到「红外 + 归属/判读」主题的条目；公开检索接口无法按谱图匹配化合物，"
+                     "请使用上方参考谱库或与对照品比对")
+    return hits[:limit], notes
+
+
+def orthogonal_advice(supported, q=None):
+    """Suggest orthogonal techniques for the groups that were proposed."""
+    tips = []
+    s = set(supported)
+    if s & {"羧酸盐"}:
+        tips.append("ICP-OES/MS 测金属含量与药物配比，确认是否为预期盐型")
+        tips.append("XRD 判定晶型/无定形，红外本身不能定晶态")
+    if s & {"酰胺", "芳环", "酯", "羧酸"}:
+        tips.append("1H / 13C NMR 确认连接方式与取代模式（红外只给官能团）")
+        tips.append("HRMS 给出分子量与分子式，排除同分异构体")
+    if s & {"氟代结构"}:
+        tips.append("19F NMR 确认含氟环境（C-F 区与 C-O 重叠，红外单证据不足）")
+    if q and q.get("water"):
+        tips.append("TGA 失重台阶或 Karl Fischer 测水分，区分吸附水与结构水")
+    if q and (q.get("saturated") or q.get("snr", 99) < 10):
+        tips.append("重新制样并复测，当前谱图质量不足以支撑归属")
+    if not tips:
+        tips.append("用同条件测定的对照品平行比对，是最可靠的一步")
+    tips.append("与对照品同条件、同制样方式平行测定（药典 0402 要求）")
+    return tips
+
+
 def _report(outdir, name, lines):
     out = pathlib.Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1234,6 +1392,36 @@ def cmd_read(args):
     for c in caveat:
         print(f"[注意] {c}")
 
+    advice = orthogonal_advice(supported, q)
+    print("\n【交叉验证建议】红外单手段不能确证，建议至少补一项：")
+    for a in advice:
+        print(f"  · {a}")
+
+    print("\n【参考谱库入口】可比对公开参考谱（需自行检索）：")
+    for nm, url in DATABASES:
+        print(f"  · {nm}：{url}")
+
+    print("\n【方法学参考】按谱型判读时可直接查阅：")
+    for t, u in CURATED_READING:
+        print(f"  · {t}\n    {u}")
+
+    hits, lookup_err = [], []
+    if getattr(args, "lookup", True):
+        print("\n【公开文献线索】检索中…", flush=True)
+        hits, lookup_err = literature_hints(supported)
+        if hits:
+            print("  以下为关键词命中的公开文献（不是同一化合物），仅供了解同类谱型与归属惯例：")
+            for h in hits:
+                meta = " · ".join(x for x in (h["source"], h["year"]) if x)
+                print(f"  - {h['title']}")
+                print(f"    {meta}" + (f" | {h['url']}" if h["url"] else ""))
+        else:
+            print("  未获得可用条目。")
+        for e in lookup_err:
+            print(f"  [跳过] {e}")
+    else:
+        print("\n【公开文献线索】已用 --no-lookup 关闭")
+
     if review:
         print("\n【需复核的归属】")
         for r in review:
@@ -1283,6 +1471,17 @@ def cmd_read(args):
             f"- **{r['pos']:.0f} cm⁻¹**（可信度 {r['conf']}）" +
             "".join(f"\n  - {w}" for w in r["why"]) for r in review] + [""]
           if review else []),
+        "## 交叉验证建议", "",
+        *[f"- {a}" for a in advice], "",
+        "## 参考谱库入口", "",
+        *[f"- [{nm}]({url})" for nm, url in DATABASES], "",
+        "## 方法学参考", "",
+        *[f"- {t}（[链接]({u})）" for t, u in CURATED_READING], "",
+        *(["## 公开文献线索", "",
+           "> 以下为关键词命中的公开文献，**不是同一化合物**，仅供了解同类谱型与归属惯例。", "",
+           *[f"- {h['title']}（{h['source']} {h['year']}）"
+             + (f" [链接]({h['url']})" if h["url"] else "") for h in hits], ""]
+          if hits else []),
         "## 可信度声明", "",
         *[f"{i}. {line}" for i, line in enumerate(RISK_LINES, 1)],
         "", "## 局限", "",
@@ -1302,6 +1501,10 @@ def cmd_read(args):
             "conclusion": summary + verdict,
             "supported": supported,
             "caveats": caveat,
+            "orthogonal": advice,
+            "databases": [{"name": n, "url": u} for n, u in DATABASES],
+            "reading": [{"title": t, "url": u} for t, u in CURATED_READING],
+            "literature": hits,
             "risk": RISK_LINES,
             "limitation": "红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型。",
             "report": str(md), "figure": str(png),
@@ -1483,6 +1686,8 @@ def build_parser():
     p7 = sub.add_parser("read", help="一键解谱：峰表 + 归属 + 结论")
     common(p7)
     p7.add_argument("--peaks", type=int, default=10)
+    p7.add_argument("--lookup", action=argparse.BooleanOptionalAction, default=True,
+                    help="检索公开文献线索（默认开启；离线可用 --no-lookup 关闭）")
     p7.set_defaults(func=cmd_read)
 
     p8 = sub.add_parser("match", help="与对照谱比对，给出判定")

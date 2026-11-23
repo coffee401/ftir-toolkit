@@ -18,6 +18,13 @@ Every rule in this tool traces back to one of the sources below. IDs are cited i
 | **S10** | Thermo Fisher, Application Note AN50733: *Curve Fitting in Raman and IR Spectroscopy* | Extra components always improve the residual but may be physically meaningless; low residual never proves a component is real; fitting and second derivatives fail at low S/N | [PDF](https://documents.thermofisher.com/TFS-Assets/CAD/Application-Notes/AN50733_E.pdf) | 2026-11-24 |
 | **S11** | *Appl. Sci.* **2026**, 16(21), 10552 (collagen FTIR review) | Deconvolution is **non-unique**: components of similar width exchange intensity while fitting equally well; area percentages depend on component count, line shape, constraints and window | [MDPI](https://www.mdpi.com/2076-3417/16/21/10552) | 2026-11-24 |
 | **S12** | "Automatic identification of compounds in molecular mixtures from liquid-phase infrared spectra", *PMC* 2025 | Automated mixture identification tops out near 90% accuracy, limited by near-identical spectra | [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC13224293/) | 2026-11-24 |
+| **S13** | ASTM E1252-98(2021), *Standard Practice for General Techniques for Obtaining Infrared Spectra for Qualitative Analysis* | Sampling and evaluation practice for qualitative IR; spectra being compared must be acquired with the same technique and conditions, and published reference spectra are not all fully validated | [astm.org](https://www.astm.org/e1252-98r21.html) | 2026-11-24 |
+| **S14** | Ph. Eur. 2.2.24 *Infrared Spectrophotometry* | Sample preparation rules (1-2 mg in 300-400 mg KBr; a disc with <60% transmittance at 2000 cm⁻¹ is rejected); identification requires the reference substance under identical conditions | [Ph. Eur. 2.2.24 (mirror)](https://www.drugfuture.com/Pharmacopoeia/BP2010/data/1001.html) | 2026-11-24 |
+| **S15** | USP <854> *Mid-Infrared Spectroscopy* | Instrument qualification and operating requirements (wavenumber accuracy, resolution, system suitability) | USP–NF, subscription required | 2026-11-24 |
+| **S16** | NIST Chemistry WebBook, SRD 69 | Open reference-spectra entry point (gas/condensed phase IR) | [webbook.nist.gov](https://webbook.nist.gov/chemistry/) | 2026-11-24 |
+| **S17** | SDBS, AIST | Free organic spectra database (IR / Raman / NMR / MS) | [sdbs.db.aist.go.jp](https://sdbs.db.aist.go.jp/) | 2026-11-24 |
+| **S18** | Coblentz Society Spectral Database | Curated professional IR library (subscription) | [coblentz.org](https://www.coblentz.org/) | 2026-11-24 |
+| **S19** | *Indonesian J. Sci. Technol.* **2022**, "Interpretation of FTIR Spectra: A Practical Approach..." | Worked interpretation workflow (functional-group region first, fingerprint second) | [DOI](https://doi.org/10.17509/ijost.v8i1.53297) | 2026-11-24 |
 
 ## How these shaped the design
 
@@ -34,10 +41,25 @@ Every rule in this tool traces back to one of the sources below. IDs are cited i
 | Saturated spectra or S/N < 3 produce no assignment at all | S5 |
 | Similarity thresholds are preset, adjustable and referenced | S4 |
 
+| A fixed "methodological reading" list in every report (S1/S3/S13/S14/S19) | S13, S14 |
+| A fixed "orthogonal validation" block, tailored to the groups that were proposed | S4, S14, S15 |
+| Literature hits are keyword leads only, explicitly labelled "not the same compound" | S13, S16-S18 |
+
+## On "finding the same spectrum in a paper"
+
+**It cannot be done, and we do not pretend otherwise.** Public APIs (OpenAlex, Europe PMC) match keywords in titles and abstracts; **none of them search by spectral similarity**. What the tool returns is discussion of similar band patterns, useful for comparing assignment conventions — not evidence that your sample is the same compound.
+
+Real spectrum-to-spectrum comparison has exactly three routes:
+
+1. **Library search**: NIST WebBook / SDBS (free), Coblentz, KnowItAll-Sadtler (subscription). Remember the inherent limits: compounds absent from the library cannot be found, and the top hit is not always correct (S6, S12).
+2. **Reference substance**: measure it under identical conditions and preparation — the pharmacopoeial route (S4, S14).
+3. **Orthogonal confirmation**: NMR, MS, XRD, elemental analysis (S4, S12).
+
 ## Limitations we do not hide
 
 1. **No spectral library** — no library search. Unknown compounds cannot be identified by library search, and the top hit is not always correct (S6, S12). We stay at the functional-group level.
 2. **Mixtures** — overlapping components sharply reduce single-component reliability (S12's ceiling is ~90% even for purpose-built algorithms).
 3. **Crystallinity** — IR only indicates a change in order; phase identification requires XRD.
 4. **Quantification** — out of scope; pharmacopoeial quantitation needs external standards or multivariate calibration.
-5. **No numerical ATR correction** — only warnings; Kramers-Kronig or dispersion correction requires refractive-index data (S9).
+5. **No spectrum-to-spectrum search** — keyword leads only (see above)
+6. **No numerical ATR correction** — only warnings; Kramers-Kronig or dispersion correction requires refractive-index data (S9).

@@ -113,6 +113,8 @@ Rule of thumb: a fitted FWHM above 60 cm⁻¹ usually means two bands were merge
 
 Two-column text (`.txt`, `.csv`, `.tsv`). `##` instrument headers are accepted; `%T` and absorbance are detected automatically and transmittance is converted.
 
+`read` also prints four extra blocks: orthogonal validation, reference databases, methodological reading and literature leads; `--no-lookup` disables the online search.
+
 ## Assignment confidence
 
 The peak table carries a confidence column (high / medium / low), and every report ends with six standing caveats. Rules and sources: [../REFERENCES.en.md](../REFERENCES.en.md).

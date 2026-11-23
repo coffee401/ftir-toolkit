@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0] - 2026-11-24
+
+### Added
+
+- **orthogonal validation block** in every `read` report: ICP / XRD / NMR / HRMS / ¹⁹F NMR /
+  TGA suggestions tailored to the groups that were proposed
+- **reference-database entry points**: NIST WebBook, SDBS, PubChem, Coblentz
+- **curated methodological reading** (four verified sources) printed with every report
+- **literature leads** via OpenAlex (primary) and Europe PMC (fallback), keeping only titles
+  that mention both infrared and assignment/interpretation; on by default, `--no-lookup` to disable
+- references extended to **19 entries** (S1-S19), adding ASTM E1252, Ph. Eur. 2.2.24,
+  USP <854>, NIST WebBook, SDBS, Coblentz database and a worked interpretation guide
+
+### Changed
+
+- reference table reorganised with standards, handbooks, peer-reviewed studies and databases
+- `REFERENCES.md` gained a section stating plainly that no public API can search by spectrum
+
+### Notes
+
+- Network lookups degrade gracefully: on timeout the step is skipped with a stated reason
+
 ## [0.2.0] - 2026-11-24
 
 ### Changed — reliability first

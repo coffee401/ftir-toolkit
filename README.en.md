@@ -69,6 +69,17 @@ Two-column text (`.txt`, `.csv`, `.tsv`): wavenumber first, intensity second.
 - Chinese Pharmacopoeia 2025, Part IV, General Chapter 0402 (IR spectroscopy): ±5 cm⁻¹ peak tolerance, ATR and transmission spectra are not directly comparable, similarity thresholds must be preset and validated.
 - GB/T 6040-2019, General rules for infrared spectrum analysis: peaks with S/N < 3 cannot support identification.
 
+## Literature leads and orthogonal validation (new in v0.3)
+
+`read` now prints four extra blocks so you can judge whether a conclusion holds:
+
+1. **Orthogonal validation** — suggested techniques per group: carboxylate → ICP + XRD; amide/aromatic → NMR + HRMS; fluorine → ¹⁹F NMR; broad envelope → TGA / Karl Fischer
+2. **Reference-spectrum databases** — NIST WebBook, SDBS, PubChem, Coblentz
+3. **Methodological reading** — four verified references (Socrates, Coates, *Indones. J. Sci. Technol.* 2022, Pharmacopoeia 0402)
+4. **Literature leads** — OpenAlex + Europe PMC keyword search, keeping only titles that mention both infrared and assignment/interpretation
+
+**Boundary**: public APIs cannot search by spectrum. Hits are discussions of similar band patterns, **not the same compound**. Offline or on timeout the step is skipped with a reason (`--no-lookup` disables it).
+
 ## Confidence and uncertainty
 
 This tool outputs **assignment hypotheses**, not structural confirmation. That is a design premise, not a disclaimer:
