@@ -69,6 +69,19 @@ Two-column text (`.txt`, `.csv`, `.tsv`): wavenumber first, intensity second.
 - Chinese Pharmacopoeia 2025, Part IV, General Chapter 0402 (IR spectroscopy): ±5 cm⁻¹ peak tolerance, ATR and transmission spectra are not directly comparable, similarity thresholds must be preset and validated.
 - GB/T 6040-2019, General rules for infrared spectrum analysis: peaks with S/N < 3 cannot support identification.
 
+## Confidence and uncertainty
+
+This tool outputs **assignment hypotheses**, not structural confirmation. That is a design premise, not a disclaimer:
+
+- Rule-based automatic assignment has a published false-positive rate of about **19%** (62 compounds, 67 four-component mixtures; false negatives ~1%) [S6]
+- A single band cannot support an assignment — at least **two independent bands** are required before a group is marked "supported" [S6,S7]
+- Frequency ranges **cannot be inverted**: no peak in a range does not mean the group is absent [S7]
+- ATR spectra are red-shifted and distorted relative to transmission and must not be compared with transmission libraries [S8,S9]
+- Deconvolution is **non-unique**: extra components always improve the fit, and a low residual does not make them real [S10,S11]
+- Saturated spectra or S/N < 3 produce no assignment at all [S5]
+
+Every report ends with six standing caveats. Source IDs map to [REFERENCES.en.md](REFERENCES.en.md) (12 entries, with links and access dates).
+
 ## Versioning and upgrades
 
 - Semantic versioning: bug fix → patch, new tool → minor, interface change → major

@@ -39,7 +39,7 @@ Prints a peak table (position / strength / shape / FWHM / reference assignment) 
 
 > A broad absorption appears at 3300-2500 cm⁻¹ (FWHM 210 cm⁻¹), assigned to carboxylic acid O-H stretching; a strong sharp band at 1688 cm⁻¹ matches carboxylic acid C=O stretching; the pair at 1600 and 1580 cm⁻¹ indicates an aromatic ring skeleton, with a mono-substituted out-of-plane bend at 710 cm⁻¹.
 >
-> Conclusion: the sample contains a carboxylic acid and an aromatic ring.
+> Conclusion: carboxylic acid and aromatic ring are supported (multiple independent bands). This is a hypothesis, not a structural confirmation.
 
 (Example output above is synthetic, not measured data.) A limitation note is appended automatically.
 
@@ -112,6 +112,10 @@ Rule of thumb: a fitted FWHM above 60 cm⁻¹ usually means two bands were merge
 ## Input
 
 Two-column text (`.txt`, `.csv`, `.tsv`). `##` instrument headers are accepted; `%T` and absorbance are detected automatically and transmittance is converted.
+
+## Assignment confidence
+
+The peak table carries a confidence column (high / medium / low), and every report ends with six standing caveats. Rules and sources: [../REFERENCES.en.md](../REFERENCES.en.md).
 
 ## Methods
 

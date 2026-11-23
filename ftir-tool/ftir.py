@@ -521,33 +521,88 @@ def fig_deconv(res, out, title=""):
 
 
 # ---------------------------------------------------------------- chinese tables
+# Reference ids map to REFERENCES.md:
+# S1 Socrates 2004 · S2 Larkin 2011 · S3 Coates · S4 中国药典 0402
+# S5 GB/T 6040-2019 · S6 Levine 1987 · S7 Affolter · S8 Coblentz ATR guide
+# S9 Mayerhöfer 2024 · S10 Thermo AN50733 · S11 MDPI 2026 · S12 PMC 2025
 BANDS_CN = [
-    (3600, 3100, "O-H / N-H 伸缩", "醇酚 O-H 为宽包，胺 N-H 较尖，伯胺常双峰；易受水峰干扰"),
-    (3100, 3000, "不饱和 C-H 伸缩（芳环/烯）", "3000 以上为 sp2 C-H"),
-    (3000, 2840, "饱和 C-H 伸缩（烷基）", "常呈 2950/2920/2850 多峰"),
-    (2300, 2100, "三键区（C≡N / C≡C）", "该区通常为空，出峰价值高；2340 双峰多为 CO₂"),
-    (1760, 1735, "酯 C=O 伸缩", "需同时出现 1200 附近强 C-O 才能判为酯"),
-    (1735, 1690, "羧酸 C=O 伸缩", "常与 3300-2500 宽 O-H 同时出现"),
-    (1690, 1630, "酰胺 C=O 伸缩", "酰胺带较宽，常伴 1550 附近 N-H 弯曲"),
-    (1630, 1560, "芳环 C=C / 共轭 C=O", "共轭会使峰位向低波数移动"),
-    (1560, 1530, "COO⁻ 反对称伸缩", "与 1430 附近对称峰成对出现"),
-    (1530, 1495, "N-H 弯曲 / 芳环骨架", "酰胺 II 带"),
-    (1495, 1445, "芳环 C=C / CH₂ 弯曲", ""),
-    (1445, 1395, "COO⁻ 对称伸缩 / CH₃ 弯曲", "与反对称峰共同给出 Δν"),
-    (1370, 1290, "C-N / C-O 伸缩", ""),
-    (1290, 1180, "C-F 伸缩", "含氟化合物常见强峰"),
-    (1180, 1000, "C-O-C / C-O 伸缩", "酯、醚、醇均有，需配合其他证据"),
-    (1000, 900, "骨架振动", ""),
-    (900, 700, "芳环 C-H 面外弯曲", "单取代约 730/690，对位约 830"),
-    (700, 500, "C-Cl / 骨架弯曲", ""),
+    dict(lo=3600, hi=3100, name="O-H / N-H 伸缩", center=3400,
+         note="醇酚 O-H 为宽包，胺 N-H 较尖，伯胺常双峰",
+         alts=["吸潮水（约 3400 宽包 + 1640 弯曲）", "羧酸 O-H（3300-2500 极宽包）"],
+         ref="S1,S2"),
+    dict(lo=3100, hi=3000, name="不饱和 C-H 伸缩（芳环/烯）", center=3060,
+         note="3000 以上为 sp2 C-H", alts=["炔 C-H（约 3300）"], ref="S1"),
+    dict(lo=3000, hi=2840, name="饱和 C-H 伸缩（烷基）", center=2925,
+         note="常呈 2950/2920/2850 多峰", alts=[], ref="S1"),
+    dict(lo=2300, hi=2100, name="三键区（C≡N / C≡C）", center=2250,
+         note="该区通常为空，出峰信息价值高",
+         alts=["大气 CO₂（2340 双峰）", "异氰酸酯 / 累积双键"], ref="S1,S2"),
+    dict(lo=1760, hi=1735, name="酯 C=O 伸缩", center=1745,
+         note="必须同时有 1200 附近强 C-O 才能判为酯",
+         alts=["酮 C=O（1715-1720）", "酸酐（1760/1820 双峰）", "醛 C=O（1725）"],
+         ref="S1,S3"),
+    dict(lo=1735, hi=1690, name="羧酸 C=O 伸缩", center=1710,
+         note="常与 3300-2500 极宽 O-H 同时出现",
+         alts=["酮（约 1715）", "醛（约 1725）", "酯（边界 1735）"], ref="S1,S2"),
+    dict(lo=1690, hi=1630, name="酰胺 C=O 伸缩", center=1660,
+         note="酰胺带较宽，常伴 1550 附近 N-H 弯曲",
+         alts=["吸潮水 1640 弯曲", "烯 C=C（1640-1680）", "醌 / 共轭酮"], ref="S1,S3"),
+    dict(lo=1630, hi=1560, name="芳环 C=C / 共轭 C=O", center=1595,
+         note="共轭使峰位向低波数移动",
+         alts=["羧酸根 1550-1610", "酰胺 II 带", "水 1640 尾部"], ref="S1,S3"),
+    dict(lo=1560, hi=1520, name="COO⁻ 反对称伸缩", center=1540,
+         note="需与 1400 附近对称峰成对判读",
+         alts=["芳环 C=C", "酰胺 II 带", "硝基 1540"], ref="S1,S3"),
+    dict(lo=1520, hi=1495, name="N-H 弯曲 / 芳环骨架", center=1508,
+         note="酰胺 II 带位置随氢键变化",
+         alts=["芳环 C=C", "硝基", "酪氨酸环呼吸 1515"], ref="S1,S3"),
+    dict(lo=1495, hi=1445, name="芳环 C=C / CH₂ 弯曲", center=1470,
+         note="", alts=["碳酸盐 1450", "CH₃ 不对称弯曲 1455"], ref="S1"),
+    dict(lo=1445, hi=1395, name="COO⁻ 对称伸缩 / CH₃ 弯曲", center=1420,
+         note="与反对称峰共同给出 Δν",
+         alts=["CH₃ 对称弯曲 1380", "碳酸盐"], ref="S1,S3"),
+    dict(lo=1370, hi=1290, name="C-N / C-O 伸缩", center=1330,
+         note="", alts=["CH₃ 1380", "硝基 1350"], ref="S1"),
+    dict(lo=1290, hi=1180, name="C-F 伸缩", center=1230,
+         note="含氟化合物常见强峰，但该区与 C-O 重叠",
+         alts=["C-O（1200-1000）", "P=O（1250）", "磺酸基"], ref="S1,S3"),
+    dict(lo=1180, hi=1000, name="C-O-C / C-O 伸缩", center=1090,
+         note="酯、醚、醇均有，需配合其他证据",
+         alts=["硅酸盐辅料（1000-1100）", "磷酸盐", "C-F 尾部"], ref="S1,S3"),
+    dict(lo=1000, hi=900, name="骨架振动", center=950,
+         note="", alts=["硅酸盐 / 滑石粉", "磷酸盐"], ref="S3"),
+    dict(lo=900, hi=700, name="芳环 C-H 面外弯曲", center=800,
+         note="单取代约 730/690，对位约 830",
+         alts=["碳酸钙 873/712（常见辅料！）", "硅酸盐"], ref="S1,S3"),
+    dict(lo=700, hi=500, name="C-Cl / 骨架弯曲", center=600,
+         note="", alts=["无机盐 / 金属氧化物", "硫酸盐 610"], ref="S3"),
+]
+
+# Literature-grade caveats printed with every interpretation report.
+RISK_LINES = [
+    "本报告是基于经验频率区间的**假设**，不是结构确证；不得作为唯一鉴定依据。",
+    "规则法自动归属的文献假阳性率约 19%（62 个化合物 / 67 个四组分混合物，"
+    "假阴性约 1%）[S6]。",
+    "频率区间表不能反向使用：某区间没有峰，并不能否定该基团存在 [S7]。",
+    "ATR 谱相对透射谱整体红移、峰形畸变，强峰位移更明显，"
+    "不可与透射谱或透射谱库直接比对 [S8,S9]。",
+    "分峰拟合结果非唯一：增加组分总能改善拟合，低残差不等于组分真实 [S10,S11]。",
+    "确证需正交手段：NMR / MS / XRD / 元素分析 [S4,S12]。",
 ]
 
 
+def assign_detail(pos):
+    for b in BANDS_CN:
+        if b["lo"] >= pos >= b["hi"]:
+            half = (b["lo"] - b["hi"]) / 2.0
+            off = abs(pos - b["center"]) / half if half else 0.0
+            return dict(b, offset=min(off, 1.0), edge=off > 0.6)
+    return None
+
+
 def assign_cn(pos):
-    for lo, hi, name, note in BANDS_CN:
-        if lo >= pos >= hi:
-            return name, note
-    return "未归类", ""
+    d = assign_detail(pos)
+    return (d["name"], d["note"]) if d else ("未归类", "")
 
 
 def strength_cn(rel):
@@ -918,7 +973,36 @@ def cmd_deconv(args):
     print(f"\nsaved: {csv_path}\nsaved: {png_path}")
 
 
-def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02):
+def _confidence(pos, rel, fwhm, d, q):
+    """Grade a single assignment. Returns (level, reasons)."""
+    if d is None:
+        return "低", ["峰位不在已知基团区间内"]
+    score, why = 0, []
+    if d["edge"]:
+        why.append("峰位靠近区间边界，可能是相邻基团")
+    else:
+        score += 1
+    if rel >= 0.5:
+        score += 1
+    elif rel < 0.2:
+        score -= 1
+        why.append(f"弱峰（相对强度 {rel * 100:.0f}%）")
+    if fwhm >= 80:
+        score -= 1
+        why.append(f"峰宽 {fwhm:.0f} cm⁻¹，可能为多峰叠加")
+    if q and q.get("water") and (3200 <= pos <= 3600 or 1600 <= pos <= 1670):
+        score -= 1
+        why.append("与吸潮水峰区间重叠")
+    if q and q.get("snr", 999) < 10:
+        score -= 1
+        why.append(f"信噪比偏低（{q['snr']:.1f}）")
+    if d["alts"]:
+        why.append("竞争归属：" + "；".join(d["alts"]))
+    level = "高" if score >= 2 else ("中" if score >= 0 else "低")
+    return level, why
+
+
+def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02, q=None):
     rng = float(np.max(spec) - np.min(spec)) or 1.0
     idx, props = find_peaks(spec, prominence=rng * prom_frac, distance=3)
     if len(idx) == 0:
@@ -931,78 +1015,134 @@ def _peak_rows(spec, grid=GRID, max_n=12, prom_frac=0.02):
         pos = float(grid[i])
         h = float(spec[i])
         w = float(peak_widths(spec, [i], rel_height=0.5)[0][0] * (grid[1] - grid[0]))
-        name, note = assign_cn(pos)
-        rows.append({"pos": pos, "abs": h, "rel": h / top, "fwhm": w,
-                     "strength": strength_cn(h / top), "shape": shape_cn(w),
-                     "band": name, "note": note})
+        d = assign_detail(pos)
+        rel = h / top
+        conf, why = _confidence(pos, rel, w, d, q)
+        rows.append({
+            "pos": pos, "abs": h, "rel": rel, "fwhm": w,
+            "strength": strength_cn(rel), "shape": shape_cn(w),
+            "band": d["name"] if d else "未归类",
+            "note": d["note"] if d else "",
+            "alts": d["alts"] if d else [],
+            "ref": d["ref"] if d else "",
+            "conf": conf, "why": why,
+        })
     return rows
 
 
-def _row_in(rows, lo, hi):
+def _row_in(rows, lo, hi, accept_low=True):
     cand = [r for r in rows if lo >= r["pos"] >= hi]
+    if not accept_low:
+        strong = [r for r in cand if r["conf"] != "低"]
+        cand = strong or cand
     return max(cand, key=lambda r: r["abs"]) if cand else None
 
 
 def build_conclusion(rows, q=None):
-    """Plain-language summary in the style reviewers expect."""
-    parts, feats = [], []
+    """Evidence-counted hypothesis. Never states a confirmed structure."""
+    if q and (q.get("saturated") or q.get("snr", 99) < 3):
+        return ("谱图质量不足，未给出归属结论。",
+                "综合判断：信号条件不满足定性要求，请先解决饱和或信噪比问题。",
+                [], [])
 
+    parts, supported, hinted = [], [], []
+    broad_note = None
+
+    def add(name, level, detail):
+        parts.append(f"{detail}，支持存在{name}" if level == "支持" else f"{detail}，提示可能含{name}（单条谱带，需复核）")
+        (supported if level == "支持" else hinted).append(name)
+
+    # carboxylate: requires the asym/sym pair with a plausible splitting
+    coa = _row_in(rows, 1560, 1520)
+    cos = _row_in(rows, 1445, 1395)
+    if coa and cos:
+        d = coa["pos"] - cos["pos"]
+        if 70 <= d <= 180:
+            add("羧酸盐", "支持",
+                f"{coa['pos']:.0f} 与 {cos['pos']:.0f} cm⁻¹ 成对出现且 Δν = {d:.0f} cm⁻¹ 落在羧酸根常见范围")
+        else:
+            add("羧酸盐", "提示",
+                f"{coa['pos']:.0f} 与 {cos['pos']:.0f} cm⁻¹ 虽成对，但 Δν = {d:.0f} cm⁻¹ 偏离常见范围")
+    elif coa:
+        add("羧酸盐", "提示", f"仅见 {coa['pos']:.0f} cm⁻¹ 一条反对称带，缺对称带佐证")
+    else:
+        buried = [r for r in rows if 1590 >= r["pos"] >= 1450 and r["fwhm"] >= 100]
+        if buried:
+            broad_note = (f"{buried[0]['pos']:.0f} cm⁻¹ 附近为宽包（FWHM {buried[0]['fwhm']:.0f}），"
+                          "可能掩盖羧酸根反对称带；如需判定请用 deconv 分峰")
+
+    # amide: C=O plus a second band from the amide set
     co_amide = _row_in(rows, 1690, 1630)
-    co_acid = _row_in(rows, 1735, 1690)
+    if co_amide:
+        nh = _row_in(rows, 1520, 1495)
+        cn = _row_in(rows, 1370, 1290)
+        if nh or cn:
+            extra = nh or cn
+            add("酰胺", "支持",
+                f"{co_amide['pos']:.0f} cm⁻¹ 羰基带与 {extra['pos']:.0f} cm⁻¹ 辅助带共同出现")
+        else:
+            add("酰胺", "提示", f"{co_amide['pos']:.0f} cm⁻¹ 单带位于酰胺羰基区，但缺 N-H 弯曲或 C-N 佐证")
+
+    # ester: C=O plus strong C-O
     co_ester = _row_in(rows, 1760, 1735)
-    c_eq_o = co_ester or co_acid or co_amide
-    if c_eq_o:
-        kind = "酯 C=O" if c_eq_o is co_ester else ("羧酸 C=O" if c_eq_o is co_acid else "酰胺 C=O")
-        parts.append(f"{c_eq_o['pos']:.0f} cm⁻¹ 处出现{phrase_cn(c_eq_o)}，"
-                     f"符合{kind} 伸缩振动")
-        feats.append(kind.replace(" C=O", "基"))
+    if co_ester:
+        co = _row_in(rows, 1180, 1000)
+        if co and co["rel"] >= 0.3:
+            add("酯", "支持", f"{co_ester['pos']:.0f} cm⁻¹ 羰基与 {co['pos']:.0f} cm⁻¹ 强 C-O 共同出现")
+        else:
+            add("酯", "提示", f"{co_ester['pos']:.0f} cm⁻¹ 位于酯羰基区，但缺 1200 附近强 C-O 佐证")
 
-    oh = _row_in(rows, 3600, 3100)
-    if oh:
-        parts.append(f"{oh['pos']:.0f} cm⁻¹ 处出现{phrase_cn(oh)}，属 O-H / N-H 伸缩")
-        feats.append("羟基或氨基")
+    # carboxylic acid: C=O plus very broad O-H
+    co_acid = _row_in(rows, 1735, 1690)
+    if co_acid:
+        oh = _row_in(rows, 3600, 3100)
+        if oh and oh["fwhm"] >= 150:
+            add("羧酸", "支持",
+                f"{co_acid['pos']:.0f} cm⁻¹ 羰基与 {oh['pos']:.0f} cm⁻¹ 极宽 O-H（FWHM {oh['fwhm']:.0f}）共同出现")
+        else:
+            add("羧酸", "提示", f"{co_acid['pos']:.0f} cm⁻¹ 位于羧酸羰基区，缺极宽 O-H 佐证")
 
-    coo_as = _row_in(rows, 1560, 1530)
-    coo_sym = _row_in(rows, 1445, 1395)
-    if coo_as and coo_sym:
-        d = coo_as["pos"] - coo_sym["pos"]
-        parts.append(f"{coo_as['pos']:.0f} 与 {coo_sym['pos']:.0f} cm⁻¹ 成对出现，"
-                     f"符合羧酸根反对称/对称伸缩（Δν = {d:.0f} cm⁻¹）")
-        feats.append("羧酸盐")
-
+    # aromatic ring: skeleton + out-of-plane
     arom = _row_in(rows, 1630, 1560)
-    para = _row_in(rows, 900, 800)
-    mono = _row_in(rows, 780, 680)
     if arom:
-        sub = ""
-        if para and 830 <= para["pos"] <= 870:
-            sub = f"，且 {para['pos']:.0f} cm⁻¹ 有对位取代特征"
-        elif mono:
-            sub = f"，且 {mono['pos']:.0f} cm⁻¹ 有单取代面外弯曲"
-        parts.append(f"{arom['pos']:.0f} cm⁻¹ 出现芳环骨架振动{sub}")
-        feats.append("芳环")
+        oop = _row_in(rows, 900, 700)
+        if oop:
+            add("芳环", "支持", f"{arom['pos']:.0f} cm⁻¹ 骨架振动与 {oop['pos']:.0f} cm⁻¹ 面外弯曲共同出现")
+        else:
+            add("芳环", "提示", f"{arom['pos']:.0f} cm⁻¹ 单带位于芳环骨架区，缺 900-700 面外弯曲佐证")
 
+    # C-F: always single-band, and overlaps C-O
     cf = _row_in(rows, 1290, 1180)
-    if cf:
-        parts.append(f"{cf['pos']:.0f} cm⁻¹ 强峰符合 C-F 伸缩")
-        feats.append("含氟")
+    if cf and cf["conf"] != "低":
+        add("氟代结构", "提示", f"{cf['pos']:.0f} cm⁻¹ 强带位于 C-F 区（该区与 C-O 重叠）")
 
+    # aliphatic C-H, only when no O-H claim competes
     ali = _row_in(rows, 3000, 2840)
-    if ali and not oh:
-        parts.append(f"{ali['pos']:.0f} cm⁻¹ 为饱和 C-H 伸缩")
-        feats.append("烷基")
+    if ali and not _row_in(rows, 3600, 3100):
+        add("烷基", "提示", f"{ali['pos']:.0f} cm⁻¹ 为饱和 C-H 伸缩")
 
-    summary = "；".join(parts) if parts else "未识别到明确官能团特征"
-    uniq = list(dict.fromkeys(feats))
-    verdict = (f"综合判断：样品含{'、'.join(uniq)}结构。") if uniq \
-        else "综合判断：谱图信息不足，建议结合其他手段。"
+    summary = "；".join(parts) + "。" if parts else "未识别到可形成假设的官能团特征。"
+    if supported or hinted:
+        bits = []
+        if supported:
+            bits.append("支持存在" + "、".join(dict.fromkeys(supported)) + "（多条独立谱带）")
+        if hinted:
+            bits.append("提示可能含" + "、".join(dict.fromkeys(hinted)) + "（单条谱带，需复核）")
+        verdict = "综合判断：" + "；".join(bits) + "。以上为假设，不构成结构确证。"
+    else:
+        verdict = "综合判断：谱图信息不足，建议结合其他手段。"
 
     caveat = []
     if q and q.get("water"):
-        caveat.append("3400 cm⁻¹ 宽包同时可能来自吸潮水，建议干燥后复测以排除干扰")
+        caveat.append("3400 cm⁻¹ 宽包可能来自吸潮水，与 O-H/N-H 归属冲突，建议干燥复测")
     if q and q.get("co2"):
-        caveat.append("2340 / 667 cm⁻¹ 疑似大气 CO₂，建议重采背景")
-    return summary, verdict, caveat
+        caveat.append(f"{q['co2_pos']:.0f} cm⁻¹ 双峰疑似大气 CO₂，该区间归属不可用")
+    if broad_note:
+        caveat.append(broad_note)
+    low = [r for r in rows if r["conf"] == "低"]
+    if low:
+        caveat.append(f"有 {len(low)} 个峰归属可信度低（见峰表），不建议据此下结论")
+    return summary, verdict, caveat, supported
 
 
 def _report(outdir, name, lines):
@@ -1068,9 +1208,9 @@ def cmd_read(args):
     q = qc_metrics(path, args.smooth)
     spec = _prepare([args.file], args.smooth, args.subtract, args.sub_factor,
                     normalize_specs=False)[0]
-    rows = _peak_rows(spec, max_n=args.peaks)
-    wide = _peak_rows(spec, max_n=args.peaks + 10)
-    for lo, hi in [(1560, 1530)]:  # never drop the carboxylate asymmetric band
+    rows = _peak_rows(spec, max_n=args.peaks, q=q)
+    wide = _peak_rows(spec, max_n=args.peaks + 10, q=q)
+    for lo, hi in [(1560, 1520)]:  # never drop the carboxylate asymmetric band
         if not any(lo >= r["pos"] >= hi for r in rows):
             cand = [r for r in wide if lo >= r["pos"] >= hi]
             if cand:
@@ -1079,21 +1219,31 @@ def cmd_read(args):
     if not rows:
         sys.exit("未识别到明显吸收峰，请检查数据或降低阈值")
 
-    summary, verdict, caveat = build_conclusion(rows, q)
+    summary, verdict, caveat, supported = build_conclusion(rows, q)
+    review = [r for r in rows if r["conf"] != "高"]
 
     print(f"=== 谱图解析：{path.name} ===")
-    print(f"{'峰位':>8} {'强度':>4} {'峰形':>5} {'FWHM':>6}  参考归属")
-    print("-" * 62)
+    print(f"{'峰位':>6} {'强度':>4} {'峰形':>4} {'FWHM':>6} {'可信度':>5}  参考归属")
+    print("-" * 66)
     for r in rows:
-        print(f"{r['pos']:>8.0f} {r['strength']:>4} {r['shape']:>5} "
-              f"{r['fwhm']:>6.0f}  {r['band']}")
+        print(f"{r['pos']:>6.0f} {r['strength']:>4} {r['shape']:>4} "
+              f"{r['fwhm']:>6.0f} {r['conf']:>5}  {r['band']}")
     print("\n【结论】")
-    print(summary + "。")
+    print(summary)
     print(verdict)
     for c in caveat:
         print(f"[注意] {c}")
-    print("\n【局限】红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型；"
-          "晶型需 XRD 佐证，结构确认需 NMR / MS 配合。")
+
+    if review:
+        print("\n【需复核的归属】")
+        for r in review:
+            print(f"  {r['pos']:.0f} cm⁻¹（可信度 {r['conf']}）")
+            for w in r["why"]:
+                print(f"    - {w}")
+
+    print("\n【可信度声明】")
+    for line in RISK_LINES:
+        print(f"  · {line.replace('**', '')}")
 
     out = pathlib.Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1102,34 +1252,44 @@ def cmd_read(args):
     fig, ax = plt.subplots(figsize=(9, 4.4), dpi=200)
     ax.plot(GRID, spec, lw=0.9, color="#1f3a93")
     top = max(np.max(spec), 1e-9)
+    colors = {"高": "#1f3a93", "中": "#e67e22", "低": "#c0392b"}
     for r in rows:
         ax.annotate(f"{r['pos']:.0f}", (r["pos"], r["abs"]), textcoords="offset points",
-                    xytext=(0, 6), ha="center", fontsize=7, rotation=90)
+                    xytext=(0, 6), ha="center", fontsize=7, rotation=90,
+                    color=colors.get(r["conf"], "#1f3a93"))
     ax.set_ylim(-0.02 * top, top * 1.35)
     ax.set_xlim(4000, 400)
     ax.set_xlabel("波数 (cm$^{-1}$)")
     ax.set_ylabel("吸光度")
-    ax.set_title(f"{path.name} 谱图解析", fontsize=10)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
+    ax.set_title(f"{path.name} 谱图解析（蓝=高 橙=中 红=低可信）", fontsize=10)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
     fig.tight_layout()
     fig.savefig(png)
     plt.close(fig)
 
     md = _report(args.outdir, f"{path.stem}_read.md", [
         f"# 谱图解析：{path.name}", "",
+        "> 本报告为**归属假设**，不是结构确证。判读前请阅读文末「可信度声明」。", "",
         "## 峰表", "",
-        "| 峰位 (cm⁻¹) | 强度 | 峰形 | FWHM | 参考归属 |",
-        "|---|---|---|---|---|",
+        "| 峰位 (cm⁻¹) | 强度 | 峰形 | FWHM | 可信度 | 参考归属 |",
+        "|---|---|---|---|---|---|",
         *[f"| {r['pos']:.0f} | {r['strength']} | {r['shape']} | {r['fwhm']:.0f} "
-          f"| {r['band']} |" for r in rows],
+          f"| {r['conf']} | {r['band']} |" for r in rows],
         "", "## 结论", "",
-        summary + "。", "", verdict, "",
+        summary, "", verdict, "",
         *([f"> 注意：{c}" for c in caveat] + [""] if caveat else []),
-        "## 局限", "",
+        *(["## 需复核的归属", ""] + [
+            f"- **{r['pos']:.0f} cm⁻¹**（可信度 {r['conf']}）" +
+            "".join(f"\n  - {w}" for w in r["why"]) for r in review] + [""]
+          if review else []),
+        "## 可信度声明", "",
+        *[f"{i}. {line}" for i, line in enumerate(RISK_LINES, 1)],
+        "", "## 局限", "",
         "红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型；"
         "晶型需 XRD 佐证，结构确认需 NMR / MS 配合。", "",
-        f"![spectrum]({png.name})",
+        f"![spectrum]({png.name})", "",
+        "文献编号见仓库 `REFERENCES.md`。",
     ])
     print(f"\nsaved: {png}\nsaved: {md}")
     if getattr(args, "json", False):
@@ -1137,9 +1297,12 @@ def cmd_read(args):
             "ok": True, "file": str(path),
             "peaks": [{"pos": round(r["pos"], 1), "strength": r["strength"],
                        "shape": r["shape"], "fwhm": round(r["fwhm"], 1),
-                       "band": r["band"]} for r in rows],
-            "conclusion": summary + "。" + verdict,
+                       "band": r["band"], "confidence": r["conf"],
+                       "alternatives": r["alts"]} for r in rows],
+            "conclusion": summary + verdict,
+            "supported": supported,
             "caveats": caveat,
+            "risk": RISK_LINES,
             "limitation": "红外只能反映官能团与成键环境，不能确定分子量、连接方式与晶型。",
             "report": str(md), "figure": str(png),
         }, ensure_ascii=False, indent=2))

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.0] - 2026-11-24
+
+### Changed — reliability first
+
+- `read` now reports a **confidence level** (high / medium / low) per peak, with the reasons
+  behind each downgrade (edge of range, weak band, broad envelope, moisture overlap, low S/N)
+- assignments require **two or more independent bands** to be marked "supported";
+  single-band evidence is downgraded to "suggests, needs review"
+- conclusions are phrased as hypotheses and never as structural confirmation
+- every report ends with six **standing caveats** (including the published ~19% false-positive
+  rate of rule-based assignment)
+- peak tables list **competing assignments** for overlapping regions
+- carboxylate asymmetric window widened to 1560-1520 cm⁻¹ so lanthanide/metal salts
+  are not misassigned as N-H bending; N-H window narrowed to 1520-1495 cm⁻¹
+- when a broad envelope covers 1450-1590 cm⁻¹, the report states that a carboxylate band
+  may be buried and points to `deconv`
+
+### Added
+
+- `REFERENCES.md` / `REFERENCES.en.md`: 12 sourced references (S1-S12) mapped to design decisions
+- README sections on confidence and uncertainty (both languages)
+
 ## [0.1.0] - 2026-11-24
 
 ### Added
