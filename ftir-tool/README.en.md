@@ -2,137 +2,171 @@
 
 [中文](README.md) | **English**
 
-Standalone FT-IR analysis for people who want conclusions, not parameters.
-Depends only on numpy / scipy / matplotlib.
+The command-line component of `ftir-toolkit`. Design goals, decision rules and references live in the [repository README](../README.en.md); this file is the manual.
+
+- Input: two-column text or instrument exports with `##` headers
+- Dependencies: `numpy`, `scipy`, `matplotlib`
+- Output: Markdown reports, PNG figures, CSV tables
+
+## Installation
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt      # Windows: .venv\Scripts\pip
+.venv/bin/pip install -r requirements.txt                  # macOS / Linux
+.venv\Scripts\python -m pip install -r requirements.txt    # Windows
 ```
 
----
-
-## Three everyday commands
-
-### `check` — is this spectrum usable?
+Verify:
 
 ```bash
-python ftir.py check 1.txt
+.venv/bin/python ftir.py --help
 ```
 
-Checks four things and returns **ok / caution / unusable**:
+## Input format
 
-| Check | Rule |
-|---|---|
-| Saturation | transmittance < 5% or a flat-topped peak → unusable, dilute and re-measure |
-| Signal-to-noise | S/N < 3 → weak peaks cannot support identification (GB/T 6040-2019) |
-| Moisture | broad band at 3400 cm⁻¹ (FWHM ≥ 120) → dry the sample and re-measure |
-| Atmospheric CO₂ | doublet near 2340 cm⁻¹ → re-collect the background |
+**Supported**
 
-### `read` — one-shot interpretation
+- Two-column numeric text: `.txt`, `.csv`, `.tsv`; delimiters may be space, tab, comma or semicolon
+- Instrument exports with `##` headers (e.g. Shimadzu or Bruker text exports); `##YUNITS=%T` is honoured
+- Wavenumber first, intensity second; either ascending or descending
+
+**Handled automatically**
+
+- `%T` vs absorbance: header declaration first, otherwise inferred from magnitude (max > 5 treated as `%T`)
+- Transmittance converted to absorbance via `A = −lg(T/100)`, with transmittance clipped at 0.5%
+- Wavenumbers sorted ascending
+
+**Not supported**
+
+- Instrument binary formats (`.spa`, `.ispd`, Bruker `fid` directories) — export to text first
+- 2D correlation spectra, imaging data, difference files
+
+## Commands
+
+### `check` — spectrum health check
 
 ```bash
-python ftir.py read 1.txt
+python ftir.py check sample.txt
 ```
 
-Prints a peak table (position / strength / shape / FWHM / reference assignment) plus a conclusion paragraph written the way reviewers expect, for example:
+Four checks, three-level verdict:
 
-> A broad absorption appears at 3300-2500 cm⁻¹ (FWHM 210 cm⁻¹), assigned to carboxylic acid O-H stretching; a strong sharp band at 1688 cm⁻¹ matches carboxylic acid C=O stretching; the pair at 1600 and 1580 cm⁻¹ indicates an aromatic ring skeleton, with a mono-substituted out-of-plane bend at 710 cm⁻¹.
->
-> Conclusion: carboxylic acid and aromatic ring are supported (multiple independent bands). This is a hypothesis, not a structural confirmation.
+| Check | Criterion | Consequence |
+|---|---|---|
+| Saturation | minimum transmittance < 5%, or a flat-topped peak | "unusable" — dilute or reduce sample amount |
+| Signal-to-noise | estimated from the MAD of the smoothing residual, < 3 | "unusable" — weak bands are not identification-grade [S5] |
+| Moisture | broad band at 3400 cm⁻¹, FWHM ≥ 120 | "caution" — dry and re-measure |
+| Atmospheric CO₂ | doublet in 2320–2385 cm⁻¹ (separation 5–30 cm⁻¹) | "caution" — re-collect the background |
 
-(Example output above is synthetic, not measured data.) A limitation note is appended automatically.
+Output: `<name>_qc.md`, `<name>_qc.png`.
 
-### `match` — compare with a reference
+### `read` — assignment hypotheses
+
+```bash
+python ftir.py read sample.txt                 # top 10 peaks
+python ftir.py read sample.txt --peaks 15      # more peaks
+python ftir.py read sample.txt --no-lookup     # skip the online search
+```
+
+Six sections: peak table (with confidence and competing assignments), conclusion, assignments needing review, orthogonal validation, reference databases, standing caveats.
+
+- Peak-level confidence uses three positive and four negative contributions — see the [decision logic](../README.en.md#decision-logic)
+- Group-level assignments follow a two-evidence rule; a single band yields "suggested" only
+- The online search is a lead generator: only titles mentioning both infrared and assignment/interpretation are kept, and timeouts are reported rather than hidden
+
+Output: `<name>_read.md`, `<name>_read.png` (annotation colour encodes confidence).
+
+### `match` — comparison against a reference
 
 ```bash
 python ftir.py match sample.txt reference.txt
+python ftir.py match sample.txt reference.txt --threshold 0.99
 ```
 
-Returns a **verdict** rather than raw numbers:
-
-```
-Verdict: inconsistent
-- full-spectrum r = 0.8933 (fingerprint r = 0.9050)
-- max peak deviation 12 cm⁻¹ (limit ±5)
-- 20 peaks matched, 11 unmatched
-- main differences: 1534 cm⁻¹ (reference stronger), 1650 cm⁻¹ (sample stronger)
-```
+Three conditions must hold: full-spectrum correlation ≥ threshold, maximum peak deviation ≤ 5 cm⁻¹, and no strong difference band (|ΔA| > 0.12).
 
 | Condition | Verdict |
 |---|---|
-| r ≥ threshold, peak deviation ≤ 5, no strong difference band | consistent |
-| r ≥ 0.95, peak deviation ≤ 10 | review |
+| all three satisfied | consistent |
+| r ≥ 0.95 and peak deviation ≤ 10 cm⁻¹ | review |
 | otherwise | inconsistent |
 
-> The 0.98 correlation threshold is empirical. Formal identification must preset and validate its own threshold per Chinese Pharmacopoeia 0402; the ±5 cm⁻¹ peak tolerance comes from the same chapter.
+Output: `<sample>_vs_<reference>.md` and `.png` (overlay plus difference spectrum with highlighted bands).
 
----
+### Research commands
 
-## Five research commands
+| Command | Purpose | Output |
+|---|---|---|
+| `single` | peak table and annotated figure (no prose) | `_peaks.csv`, `_annotated.png` |
+| `compare` | band positions, similarity matrix, overlay | `band_comparison.csv`, `comparison.png` |
+| `detail` | O-H centre/FWHM, C=O by 2nd derivative, COO⁻ splitting, area ratios | `metrics.csv`, `second_derivative.png`, `ratios.png` |
+| `series` | trends against a parameter with an exact permutation test | `series_metrics.csv`, `trend.png` |
+| `deconv` | pseudo-Voigt fitting with component shares and R² | `*_deconv.csv`, `*_deconv.png` |
 
-| Command | Purpose |
-|---|---|
-| `single` | peak table + annotated figure (no prose) |
-| `compare` | band positions across samples + similarity matrix + overlay |
-| `detail` | O-H centre/FWHM, C=O via 2nd derivative, COO⁻ splitting, band-area ratios |
-| `series` | `detail` metrics + trend against a parameter (e.g. ionic radius) with exact permutation test |
-| `deconv` | fit overlapping bands with pseudo-Voigt components, report area share and R² |
-
-### Reference subtraction (all commands)
+Examples:
 
 ```bash
-python ftir.py detail 2.txt --subtract blank.txt --sub-factor auto
+python ftir.py detail 1.txt 2.txt 3.txt --labels A,B,C
+python ftir.py series 2.txt 3.txt 4.txt --labels Ce,Eu,Gd --radii 1.143,1.066,1.053
+python ftir.py deconv 1.txt --region 1500,1750 --max-peaks 5
+python ftir.py deconv 1.txt --region 1490,1750 --centers 1510,1530,1560,1596,1657
 ```
 
-`auto` fits the scale by least squares — useful for removing KBr moisture, atmospheric water vapour and CO₂. **Over-subtraction shows up as negative bands**; if you see them, switch to a fixed factor (e.g. `--sub-factor 0.8`).
-
-### Deconvolution
-
-```bash
-python ftir.py deconv 1.txt --region 1500,1750
-python ftir.py deconv 5.txt --region 1490,1750 --centers 1510,1528,1563,1596,1657
-```
-
-Rule of thumb: a fitted FWHM above 60 cm⁻¹ usually means two bands were merged — supply `--centers` to split them.
-
-## Options
+**Deconvolution options**
 
 | Option | Meaning | Default |
 |---|---|---|
-| `--outdir` | output directory | `output` |
-| `--smooth` | Savitzky-Golay window (odd) | 9 |
-| `--labels` | comma-separated sample names | file names |
-| `--peaks` | peak count for `read` / `single` | 10 / 20 |
-| `--subtract` | reference spectrum to subtract | none |
-| `--sub-factor` | subtraction scale, number or `auto` | `1.0` |
-| `--threshold` | correlation threshold for `match` | 0.98 |
-| `--json` | also print machine-readable JSON | off |
+| `--region` | fitting window, `low,high` | `1500,1750` |
+| `--max-peaks` | maximum number of components to auto-detect | 5 |
+| `--centers` | manual initial centres, overriding auto-detection | auto |
+| `--model` | line shape: `voigt`, `lorentz`, `gauss` | `voigt` |
 
-## Input
+A fitted FWHM above 60 cm⁻¹ usually means two bands were merged — supply `--centers` to split them. Note that the number of components itself changes the result, so fitted area shares are not absolute contents [S10][S11].
 
-Two-column text (`.txt`, `.csv`, `.tsv`). `##` instrument headers are accepted; `%T` and absorbance are detected automatically and transmittance is converted.
+## Shared options
 
-`read` also prints four extra blocks: orthogonal validation, reference databases, methodological reading and literature leads; `--no-lookup` disables the online search.
+| Option | Meaning | Default |
+|---|---|---|
+| `--outdir` `-o` | output directory | `output` |
+| `--smooth` | Savitzky–Golay window in points (odd) | 9 |
+| `--labels` | comma-separated sample names (`compare`/`detail`/`series`) | file names |
+| `--subtract` | reference spectrum to subtract (e.g. KBr blank) | none |
+| `--sub-factor` | subtraction scale: number or `auto` | `1.0` |
+| `--json` | emit machine-readable JSON as well | off |
 
-## Assignment confidence
+**Reference subtraction** operates on raw absorbance, then re-applies baseline correction so background bands are removed rather than absorbed by the baseline fit. `auto` scales by least squares over the reference's own bands. Over-subtraction produces negative bands — switch to a fixed factor and decrease it (0.8, 0.6).
 
-The peak table carries a confidence column (high / medium / low), and every report ends with six standing caveats. Rules and sources: [../REFERENCES.en.md](../REFERENCES.en.md).
+**`--json` output** carries the peak table (including `confidence` and `alternatives`), the conclusion, `caveats`, `orthogonal`, `databases`, `reading`, `literature`, `risk`, and report paths.
 
-## Methods
+## Output conventions
 
-- **Baseline**: asymmetric least squares (ALS, λ=1e5, p=0.001, 12 iterations)
-- **Smoothing**: Savitzky-Golay, 9 points, order 3
-- **Peak picking**: `find_peaks` with a prominence threshold; peaks are searched inside each window so shoulders are not missed
-- **Second derivative**: SG 15 points, order 3, negated — used to locate overlapping components
-- **Assignments**: matched against functional-group ranges and reported as *reference* assignments
-- **Semi-quantification**: band areas normalised to the 844 cm⁻¹ aromatic out-of-plane band
-- **Deconvolution**: pseudo-Voigt with a shared η, centres bounded ±25 cm⁻¹, FWHM 4-120 cm⁻¹
+- File names are prefixed with the input stem (extension removed); multi-spectrum commands use fixed names
+- Markdown is UTF-8 and uses standard tables, ready to paste into a report
+- Figures are 200 dpi PNG, wavenumber axis reversed, with a registered CJK font (DengXian, Microsoft YaHei, SimHei in that order)
 
-## Known limitations (the tool warns about these)
+## Method parameters
 
-- IR cannot decide crystallinity: nanocrystals and amorphous solids both broaden bands — use XRD
-- KBr moisture strongly enhances the 3400 cm⁻¹ envelope; dry samples before comparing water content
-- Peaks with S/N < 3 must not be used for identification
-- Band-area ratios compare trends within a batch only, never absolute content
-- ATR and transmission spectra must not be compared directly
+| Step | Method and parameters |
+|---|---|
+| Baseline | ALS, λ = 1×10⁵, p = 0.001, 12 iterations |
+| Smoothing | Savitzky–Golay, 9 points, order 3 |
+| Peak picking | local maxima, prominence ≥ 0.02 × dynamic range, minimum 3-point spacing |
+| FWHM | `peak_widths`, rel_height = 0.5 |
+| Second derivative | SG 15 points, order 3, negated |
+| Deconvolution | pseudo-Voigt with shared η, centres ±25 cm⁻¹, FWHM 4–120 cm⁻¹ |
+| Similarity | Pearson correlation over the full range and ≤1500 cm⁻¹ |
+| Trend test | Spearman with exact permutation (all permutations for n ≤ 8) |
+
+## Error handling
+
+- Missing files, too few data points, or an empty fitting region exit with a non-zero code and a message on stderr
+- Network failures during the literature lookup are not errors; the reason is recorded in the report
+- When quality control fails, `read` still prints the peak table but replaces the conclusion with "quality insufficient, no assignment given"
+
+## Limitations
+
+See [the repository README](../README.en.md#known-limitations). In short: no polymorph, no molecular weight, no quantification, no library search, no numerical ATR correction.
+
+## References
+
+Criterion and parameter sources (S1–S19) are listed in [REFERENCES.en.md](../REFERENCES.en.md).

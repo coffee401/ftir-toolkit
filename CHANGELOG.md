@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1] - 2026-11-24
+
+### Changed — documentation rewritten
+
+- README rewritten at all three levels (repository, CLI, plugin) in Chinese and English, with a
+  consistent structure: capability table, design principles, decision logic (confidence scoring
+  and the two-evidence rule), method parameters, sources of uncertainty, known limitations,
+  versioning and citation
+- every example now uses synthetic data and states so explicitly; no sample-specific spectrum,
+  compound name or instrument identifier appears anywhere in the repository
+- plugin README now documents tool inputs and return fields, interpreter resolution order,
+  self-test expectations, known pitfalls and the release checklist
+- cross-document links verified; relative paths resolve
+
 ## [0.3.0] - 2026-11-24
 
 ### Added
